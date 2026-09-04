@@ -1,2 +1,4 @@
 target/
 .mcpp/
+.vscode/
+compile_commands.json

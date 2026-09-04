@@ -1,5 +1,4 @@
 import std;
-import demo.common;
 import toml;
 
 /**
@@ -10,19 +9,5 @@ import toml;
  */
 int main(int argc, const char* argv[])
 {
-    common::A a{"Ada", 37};
-    const auto text = toml::serialize(a);
-    if (!text) {
-        std::println("serialize failed: {}", text.error());
-        return 1;
-    }
-    std::print("{}", *text);
-
-    const auto decoded = toml::deserializee<common::A>(*text);
-    if (!decoded) {
-        std::println("deserialize failed: {}", decoded.error());
-        return 1;
-    }
-    std::println("round-trip: {} ({})", decoded->name, decoded->age);
     return 0;
 }
