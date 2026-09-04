@@ -1,0 +1,67 @@
+# TOML 1.0 语法样例。这里有意混用不同的词法形式，确保解析器能够处理注释、
+# 键、字符串、标量、集合、表和数组表，而不只是解析自身序列化生成的文本。
+
+title = "TOML syntax fixture"
+bare_key = "bare key"
+"quoted key" = "quoted key"
+'quoted.dot' = "quoted dotted key"
+
+basic_string = "quote: \" slash: \\ tab: \t unicode: \u03B1 rocket: \U0001F680"
+literal_string = 'C:\Users\toml\config.toml'
+multiline_basic = """
+Roses are red
+Violets are blue"""
+multiline_continuation = """\
+    The quick \
+    brown fox"""
+multiline_literal = '''
+C:\Users\toml\
+literal text'''
+
+integer = 1_000
+negative_integer = -42
+positive_integer = +99
+hexadecimal = 0xDEAD_BEEF
+octal = 0o755
+binary = 0b1101_0010
+float_value = 3.141_592_65
+scientific = 5e+22
+negative_infinity = -inf
+not_a_number = nan
+enabled = true
+
+local_date = 1979-05-27
+local_time = 07:32:00.123456789
+local_datetime = 1979-05-27T07:32:00.123
+offset_datetime = 1979-05-27T07:32:00.123+07:00
+utc_datetime = 1979-05-27 07:32:00Z
+
+numbers = [1, 2, 3]
+multiline_array = [
+    1,
+    # 数组元素之间允许出现注释
+    2,
+    3,
+]
+nested_array = [[1, 2], [3, 4]]
+inline = { name = "inline table", count = 2, nested.enabled = true }
+dotted.parent.child = "dotted key"
+
+[table]
+name = "regular table"
+
+[table.nested]
+enabled = false
+labels = ["one", "two"]
+
+[[products]]
+name = "Hammer"
+sku = 738594937
+
+[products.dimensions]
+width = 3
+height = 4
+
+[[products]]
+name = "Nail"
+sku = 284758393

@@ -1,0 +1,16 @@
+[package]
+name        = "demo"
+version     = "0.1.0"
+description = "A modular C++26 package"
+license     = "Apache-2.0"
+standard    = "c++23"
+
+[toolchain]
+default = "llvm@22.1.8"
+
+[build]
+default-profile = "debug"
+
+[targets.app]
+kind = "bin"
+main = "src/main.cpp"
