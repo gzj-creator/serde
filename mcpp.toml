@@ -1,5 +1,5 @@
 [package]
-name        = "demo"
+name        = "serde"
 version     = "0.1.0"
 description = "A modular C++26 package"
 license     = "Apache-2.0"
