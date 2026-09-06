@@ -11,6 +11,20 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 抽出可复用的 `reflect` module 与 `REFLECT_*` 宏，TOML 和后续 JSON 等序列化器共享同一字段描述符。
+- 移除 TOML 专用 `toml_reflect.hpp` 和 `TOML_REFLECT_*` 兼容入口，统一使用通用反射接口。
+- 增加嵌套数组表、严格数字词法、重复表定义、内联表重开、UTF-8/控制字符和 GCC 16.1 静态反射探针测试。
+
+### 修复
+
+- 加强 TOML 日期时间、字符串、键、数组和表状态校验，拒绝超出规范的词法与结构输入。
+
+### 文档
+
+- 记录 GCC 16.1 `std::meta`/`-freflection` 的可行性，以及 GCC BMI、libstdc++/libc++ 与 LLVM 消费边界。
+
 ### 维护
 
 - 将 `mcpp.toml` 中的包名从 `demo` 修正为 `serde`，使包元数据与项目名称保持一致。

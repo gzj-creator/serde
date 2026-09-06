@@ -1,7 +1,7 @@
 import std;
 import toml;
 
-#include "../src/toml/toml_reflect.hpp"
+#include "../src/reflect/reflect_macros.hpp"
 
 namespace {
 
@@ -10,37 +10,109 @@ struct Required {
     int age{};
 };
 
-TOML_REFLECT_MEMBERS(Required, name, age)
+#define SERDE_FIELDS_1(X) \
+    X(name) \
+    X(age)
+REFLECT_FIELDS(Required, SERDE_FIELDS_1)
+#undef SERDE_FIELDS_1
 
 struct Pair {
     std::array<int, 2> values{};
 };
 
-TOML_REFLECT_MEMBERS(Pair, values)
+#define SERDE_FIELDS_2(X) \
+    X(values)
+REFLECT_FIELDS(Pair, SERDE_FIELDS_2)
+#undef SERDE_FIELDS_2
 
 struct DateRecord {
     toml::date day;
 };
 
-TOML_REFLECT_MEMBERS(DateRecord, day)
+#define SERDE_FIELDS_3(X) \
+    X(day)
+REFLECT_FIELDS(DateRecord, SERDE_FIELDS_3)
+#undef SERDE_FIELDS_3
 
 struct ConstRecord {
     const int value = 1;
 };
 
-TOML_REFLECT_MEMBERS(ConstRecord, value)
+#define SERDE_FIELDS_4(X) \
+    X(value)
+REFLECT_FIELDS(ConstRecord, SERDE_FIELDS_4)
+#undef SERDE_FIELDS_4
 
 struct WideUnsigned {
     std::uint64_t id{};
 };
 
-TOML_REFLECT_MEMBERS(WideUnsigned, id)
+#define SERDE_FIELDS_5(X) \
+    X(id)
+REFLECT_FIELDS(WideUnsigned, SERDE_FIELDS_5)
+#undef SERDE_FIELDS_5
 
 struct OptionalArray {
     std::vector<std::optional<int>> values;
 };
 
-TOML_REFLECT_MEMBERS(OptionalArray, values)
+#define SERDE_FIELDS_6(X) \
+    X(values)
+REFLECT_FIELDS(OptionalArray, SERDE_FIELDS_6)
+#undef SERDE_FIELDS_6
+
+struct Scalar {
+    int value{};
+};
+
+#define SERDE_FIELDS_7(X) \
+    X(value)
+REFLECT_FIELDS(Scalar, SERDE_FIELDS_7)
+#undef SERDE_FIELDS_7
+
+struct Timestamp {
+    toml::offset_date_time value;
+};
+
+#define SERDE_FIELDS_8(X) \
+    X(value)
+REFLECT_FIELDS(Timestamp, SERDE_FIELDS_8)
+#undef SERDE_FIELDS_8
+
+struct Text {
+    std::string value;
+};
+
+#define SERDE_FIELDS_9(X) \
+    X(value)
+REFLECT_FIELDS(Text, SERDE_FIELDS_9)
+#undef SERDE_FIELDS_9
+
+struct MultiText {
+    std::string value;
+};
+
+#define SERDE_FIELDS_10(X) \
+    X(value)
+REFLECT_FIELDS(MultiText, SERDE_FIELDS_10)
+#undef SERDE_FIELDS_10
+
+struct Keyed {
+    std::map<std::string, int> values;
+};
+
+#define SERDE_FIELDS_11(X) \
+    X(values)
+REFLECT_FIELDS(Keyed, SERDE_FIELDS_11)
+#undef SERDE_FIELDS_11
+
+struct EscapedKey {
+    int value{};
+};
+
+#define ESCAPED_KEY_FIELDS(X) X(value, "\x01")
+REFLECT_FIELDS(EscapedKey, ESCAPED_KEY_FIELDS)
+#undef ESCAPED_KEY_FIELDS
 
 /**
  * @brief 检查结果是否失败并包含预期错误片段。
@@ -116,6 +188,65 @@ int main() {
                            "optional null inside TOML array");
     passed &= expect_error(toml::serialize(DateRecord{{2024, 2, 30}}), "invalid toml::date",
                            "invalid temporal serialization value");
+
+    passed &= expect_error(toml::deserialize<Scalar>("value = 01\n"),
+                           "leading zero", "leading zero integer");
+    passed &= expect_error(toml::deserialize<Scalar>("value = 1.\n"),
+                           "fraction", "missing floating fraction");
+    passed &= expect_error(toml::deserialize<Scalar>("value = 1e\n"),
+                           "exponent", "missing floating exponent");
+    passed &= expect_error(toml::deserialize<Scalar>("value =\n1\n"),
+                           "missing TOML value", "newline before value");
+    passed &= expect_error(toml::deserialize<Scalar>("value = 0x_1\n"),
+                           "underscore", "prefixed integer underscore");
+    passed &= expect_error(toml::deserialize<Scalar>("value = 1__0\n"),
+                           "underscore", "repeated integer underscore");
+    passed &= expect_error(toml::deserialize<Scalar>("[section]\na = 1\n[section]\nb = 2\n"),
+                           "duplicate", "repeated table header");
+    passed &= expect_error(toml::deserialize<Scalar>("value.other = 1\n[value]\nvalue = 2\n"),
+                           "duplicate", "dotted key parent cannot be reopened");
+    passed &= expect_error(toml::deserialize<Scalar>("value = { nested = 1 }\n[value]\n"),
+                           "existing value", "inline table cannot be reopened");
+    passed &= expect_error(toml::deserialize<Scalar>("value = 1\n[[value]]\n"),
+                           "array-table", "array-table scalar conflict");
+    passed &= expect_error(toml::deserialize<Scalar>("value = \"\xFF\"\n"),
+                           "UTF-8", "invalid UTF-8 string");
+    passed &= expect_error(toml::deserialize<Scalar>("value = \"\x7f\"\n"),
+                           "control", "raw DEL control character");
+    passed &= expect_error(toml::deserialize<MultiText>("value = \"\"\"bad\x7f\"\"\"\n"),
+                           "control", "raw DEL in multiline basic string");
+    const auto escaped_text = toml::serialize(Text{"bad\x01"});
+    passed &= static_cast<bool>(escaped_text) &&
+              escaped_text->find("\\u0001") != std::string::npos;
+    const auto escaped_key = toml::serialize(Keyed{{{"bad\x01", 1}}});
+    passed &= static_cast<bool>(escaped_key) &&
+              escaped_key->find("\\u0001") != std::string::npos;
+    const auto escaped_key_input = toml::deserialize<EscapedKey>("\"\\u0001\" = 7\n");
+    passed &= escaped_key_input && escaped_key_input->value == 7;
+
+    const toml::parse_options limited_input{.max_input_bytes = 4};
+    passed &= expect_error(toml::deserialize<Scalar>("value = 1\n", limited_input),
+                           "input", "input size limit");
+
+    toml::parse_options limited_depth;
+    limited_depth.max_depth = 2;
+    passed &= expect_error(toml::deserialize<Scalar>("value = [[1]]\n", limited_depth),
+                           "depth", "nesting depth limit");
+
+    toml::parse_options limited_array;
+    limited_array.max_array_items = 2;
+    passed &= expect_error(toml::deserialize<OptionalArray>("values = [1, 2, 3]\n", limited_array),
+                           "item count", "array item limit");
+
+    toml::parse_options strict_schema;
+    strict_schema.unknown_fields = toml::unknown_field_policy::reject;
+    passed &= expect_error(toml::deserialize<Scalar>("value = 1\nextra = 2\n", strict_schema),
+                           "unknown field", "strict unknown field policy");
+
+    toml::serialize_options limited_output;
+    limited_output.max_output_bytes = 1;
+    passed &= expect_error(toml::serialize(Text{"hello"}, limited_output),
+                           "output", "output size limit");
 
     return passed ? 0 : 1;
 }

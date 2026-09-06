@@ -1,6 +1,7 @@
 export module toml;
 
 export import std;
+export import reflect;
 
 export namespace toml {
 
@@ -10,6 +11,22 @@ export namespace toml {
  */
 template <class T>
 using result = std::expected<T, std::string>;
+
+enum class unknown_field_policy { ignore, reject };
+
+struct parse_options {
+    std::size_t max_input_bytes = 64ULL * 1024ULL * 1024ULL;
+    std::size_t max_nodes = 1000000;
+    std::size_t max_depth = 128;
+    std::size_t max_string_bytes = 16ULL * 1024ULL * 1024ULL;
+    std::size_t max_key_bytes = 1ULL * 1024ULL * 1024ULL;
+    std::size_t max_array_items = 1000000;
+    unknown_field_policy unknown_fields = unknown_field_policy::ignore;
+};
+
+struct serialize_options {
+    std::size_t max_output_bytes = 64ULL * 1024ULL * 1024ULL;
+};
 
 /**
  * @brief 表示 TOML 的本地日期值。
@@ -101,43 +118,16 @@ struct inline_table {
  * @tparam Member 成员类型。
  */
 template <class Owner, class Member>
-struct field {
-    std::string_view name;
-    Member Owner::*pointer;
+using field = reflect::field<Owner, Member>;
 
-    /**
-     * @brief 通过成员指针取得对象中的字段。
-     * @tparam Object 对象类型，可以是左值或右值。
-     * @param object 待读取字段的对象。
-     * @return 对应字段的引用，并保持对象的值类别。
-     */
-    template <class Object>
-    constexpr decltype(auto) get(Object&& object) const noexcept {
-        return std::forward<Object>(object).*pointer;
-    }
-};
+using reflect::make_field;
 
 /**
- * @brief 创建一个反射字段描述符。
- * @tparam Owner 拥有该成员的结构类型。
- * @tparam Member 成员类型。
- * @param name TOML 字段名称。
- * @param pointer 指向成员的指针。
- * @return 新建的字段描述符。
- */
-template <class Owner, class Member>
-constexpr auto make_field(std::string_view name, Member Owner::*pointer) {
-    return field<Owner, Member>{name, pointer};
-}
-
-/**
- * @brief 判断类型是否提供可通过参数依赖查找找到的反射函数。
+ * @brief 判断类型是否提供通用反射字段描述。
  * @tparam T 待检测的类型。
  */
 template <class T>
-concept reflectable = requires(const std::remove_cvref_t<T>& value) {
-    toml_reflect(value);
-};
+concept reflectable = reflect::reflectable<T>;
 
 /**
  * @brief 遍历对象的全部反射字段。
@@ -149,12 +139,7 @@ concept reflectable = requires(const std::remove_cvref_t<T>& value) {
 template <class T, class Function>
     requires reflectable<T>
 constexpr void for_each_field(T& value, Function&& function) {
-    auto descriptors = toml_reflect(value);
-    std::apply(
-        [&](const auto&... descriptor) {
-            (std::invoke(function, descriptor, value), ...);
-        },
-        descriptors);
+    reflect::for_each_field(value, std::forward<Function>(function));
 }
 
 namespace detail {
@@ -234,6 +219,15 @@ struct node {
 
     storage value{};
     bool inline_table = false;
+    bool array_table = false;
+
+    enum class table_definition {
+        implicit,
+        dotted_key,
+        explicit_table,
+        array_element,
+        inline_table,
+    } definition = table_definition::implicit;
 
     /** @brief 构造一个空节点。 */
     node() = default;
@@ -274,19 +268,85 @@ struct node {
     node(T&& input) : value(std::forward<T>(input)) {}
 };
 
+/** @brief Check that a byte string is well-formed UTF-8. */
+inline bool valid_utf8(std::string_view text) {
+    for (std::size_t index = 0; index < text.size();) {
+        const auto byte = static_cast<unsigned char>(text[index]);
+        if (byte <= 0x7f) {
+            ++index;
+            continue;
+        }
+        std::size_t width = 0;
+        std::uint32_t code_point = 0;
+        std::uint32_t minimum = 0;
+        if (byte >= 0xc2 && byte <= 0xdf) {
+            width = 2;
+            code_point = byte & 0x1f;
+            minimum = 0x80;
+        } else if (byte >= 0xe0 && byte <= 0xef) {
+            width = 3;
+            code_point = byte & 0x0f;
+            minimum = 0x800;
+        } else if (byte >= 0xf0 && byte <= 0xf4) {
+            width = 4;
+            code_point = byte & 0x07;
+            minimum = 0x10000;
+        } else {
+            return false;
+        }
+        if (index + width > text.size()) {
+            return false;
+        }
+        for (std::size_t continuation = 1; continuation < width; ++continuation) {
+            const auto next = static_cast<unsigned char>(text[index + continuation]);
+            if ((next & 0xc0) != 0x80) {
+                return false;
+            }
+            code_point = (code_point << 6) | (next & 0x3f);
+        }
+        if (code_point < minimum || code_point > 0x10ffff ||
+            (code_point >= 0xd800 && code_point <= 0xdfff)) {
+            return false;
+        }
+        index += width;
+    }
+    return true;
+}
+
+/** @brief Check UTF-8 plus the control characters representable by TOML strings. */
+inline void mark_inline_table(node& value) {
+    value.inline_table = true;
+    value.definition = node::table_definition::inline_table;
+    if (auto* table = std::get_if<node::table>(&value.value)) {
+        for (auto& [key, child] : *table) {
+            static_cast<void>(key);
+            mark_inline_table(child);
+        }
+    } else if (auto* array = std::get_if<node::array>(&value.value)) {
+        for (auto& child : *array) {
+            mark_inline_table(child);
+        }
+    }
+}
+
 /**
  * @brief 去除字符串首尾的 ASCII 空白字符。
  * @param text 待处理的文本视图。
  * @return 去除首尾空白后的视图；不会复制底层字符串。
  */
 inline std::string_view trim(std::string_view text) {
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
         text.remove_prefix(1);
     }
-    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) {
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
         text.remove_suffix(1);
     }
     return text;
+}
+
+inline bool toml_whitespace(char character) {
+    return character == ' ' || character == '\t' || character == '\n' ||
+           character == '\r';
 }
 
 /**
@@ -294,73 +354,7 @@ inline std::string_view trim(std::string_view text) {
  * @param line 待处理的单行文本。
  * @return 去除注释后的字符串。
  */
-inline std::string strip_comment(std::string_view line) {
-    bool double_quoted = false;
-    bool single_quoted = false;
-    bool escaped = false;
-
-    for (std::size_t index = 0; index < line.size(); ++index) {
-        const char character = line[index];
-        if (double_quoted) {
-            if (escaped) {
-                escaped = false;
-            } else if (character == '\\') {
-                escaped = true;
-            } else if (character == '"') {
-                double_quoted = false;
-            }
-        } else if (single_quoted) {
-            if (character == '\'') {
-                single_quoted = false;
-            }
-        } else if (character == '"') {
-            double_quoted = true;
-        } else if (character == '\'') {
-            single_quoted = true;
-        } else if (character == '#') {
-            return std::string(line.substr(0, index));
-        }
-    }
-
-    return std::string(line);
-}
-
-/**
- * @brief 查找不在引号中的目标字符。
- * @param text 待搜索的文本。
- * @param needle 要查找的字符。
- * @return 目标字符的位置；找不到时返回 `std::string_view::npos`。
- */
-inline std::size_t find_unquoted(std::string_view text, char needle) {
-    bool double_quoted = false;
-    bool single_quoted = false;
-    bool escaped = false;
-
-    for (std::size_t index = 0; index < text.size(); ++index) {
-        const char character = text[index];
-        if (double_quoted) {
-            if (escaped) {
-                escaped = false;
-            } else if (character == '\\') {
-                escaped = true;
-            } else if (character == '"') {
-                double_quoted = false;
-            }
-        } else if (single_quoted) {
-            if (character == '\'') {
-                single_quoted = false;
-            }
-        } else if (character == '"') {
-            double_quoted = true;
-        } else if (character == '\'') {
-            single_quoted = true;
-        } else if (character == needle) {
-            return index;
-        }
-    }
-
-    return std::string_view::npos;
-}
+inline result<void> append_utf8(std::string& output, std::uint32_t code_point);
 
 /**
  * @brief 解析单个 TOML 键并返回其实际名称。
@@ -382,11 +376,17 @@ inline result<std::string> parse_key(std::string_view raw_key) {
         }
         if (quote == '\'') {
             for (std::size_t index = 1; index + 1 < key.size(); ++index) {
-                if (key[index] == '\'' || key[index] == '\n' || key[index] == '\r') {
+                if (key[index] == '\'' || key[index] == '\n' || key[index] == '\r' ||
+                    key[index] == 0x7f ||
+                    (static_cast<unsigned char>(key[index]) < 0x20 && key[index] != '\t')) {
                     return std::unexpected(std::string("invalid literal TOML key"));
                 }
             }
-            return std::string(key.substr(1, key.size() - 2));
+            const auto value = key.substr(1, key.size() - 2);
+            if (!valid_utf8(value)) {
+                return std::unexpected(std::string("invalid UTF-8 in TOML key"));
+            }
+            return std::string(value);
         }
 
         std::string decoded;
@@ -402,6 +402,32 @@ inline result<std::string> parse_key(std::string_view raw_key) {
                     case 't': decoded.push_back('\t'); break;
                     case '"': decoded.push_back('"'); break;
                     case '\\': decoded.push_back('\\'); break;
+                    case 'u':
+                    case 'U': {
+                        const std::size_t width = character == 'u' ? 4 : 8;
+                        if (index + width >= key.size()) {
+                            return std::unexpected(std::string("truncated Unicode TOML key escape"));
+                        }
+                        std::uint32_t code_point = 0;
+                        for (std::size_t digit_index = 0; digit_index < width; ++digit_index) {
+                            const char digit = key[++index];
+                            code_point <<= 4;
+                            if (digit >= '0' && digit <= '9') {
+                                code_point |= static_cast<std::uint32_t>(digit - '0');
+                            } else if (digit >= 'a' && digit <= 'f') {
+                                code_point |= static_cast<std::uint32_t>(digit - 'a' + 10);
+                            } else if (digit >= 'A' && digit <= 'F') {
+                                code_point |= static_cast<std::uint32_t>(digit - 'A' + 10);
+                            } else {
+                                return std::unexpected(std::string("invalid Unicode TOML key escape"));
+                            }
+                        }
+                        auto encoded = append_utf8(decoded, code_point);
+                        if (!encoded) {
+                            return std::unexpected(encoded.error());
+                        }
+                        break;
+                    }
                     default:
                         return std::unexpected(std::string("unsupported key escape"));
                 }
@@ -412,6 +438,10 @@ inline result<std::string> parse_key(std::string_view raw_key) {
                 return std::unexpected(std::string("unescaped quote in TOML key"));
             } else if (character == '\n' || character == '\r') {
                 return std::unexpected(std::string("invalid TOML key"));
+            } else if ((static_cast<unsigned char>(character) < 0x20 &&
+                        character != '\t') ||
+                       static_cast<unsigned char>(character) == 0x7f) {
+                return std::unexpected(std::string("control character in TOML key"));
             } else {
                 decoded.push_back(character);
             }
@@ -419,11 +449,16 @@ inline result<std::string> parse_key(std::string_view raw_key) {
         if (escaped) {
             return std::unexpected(std::string("unterminated key escape"));
         }
+        if (!valid_utf8(decoded)) {
+            return std::unexpected(std::string("invalid UTF-8 in TOML key"));
+        }
         return decoded;
     }
 
     for (const char character : key) {
-        if (!(std::isalnum(static_cast<unsigned char>(character)) ||
+        if (!((character >= 'A' && character <= 'Z') ||
+              (character >= 'a' && character <= 'z') ||
+              (character >= '0' && character <= '9') ||
               character == '_' || character == '-')) {
             return std::unexpected(std::string("invalid bare TOML key: ") +
                                    std::string(key));
@@ -437,7 +472,12 @@ inline result<std::string> parse_key(std::string_view raw_key) {
  * @param raw 原始键路径文本。
  * @return 按层级拆分后的键名列表，或包含原因的错误结果。
  */
-inline result<std::vector<std::string>> parse_key_path(std::string_view raw) {
+inline result<std::vector<std::string>> parse_key_path(std::string_view raw,
+                                                        std::size_t max_key_bytes = std::numeric_limits<std::size_t>::max(),
+                                                        std::size_t max_components = std::numeric_limits<std::size_t>::max()) {
+    if (raw.size() > max_key_bytes) {
+        return std::unexpected(std::string("TOML key exceeds configured size limit"));
+    }
     std::vector<std::string> parts;
     std::size_t start = 0;
     bool double_quoted = false;
@@ -472,6 +512,9 @@ inline result<std::vector<std::string>> parse_key_path(std::string_view raw) {
             if (!part) {
                 return std::unexpected(part.error());
             }
+            if (part->size() > max_key_bytes || parts.size() >= max_components) {
+                return std::unexpected(std::string("TOML key exceeds configured size limit"));
+            }
             parts.push_back(std::move(*part));
             start = index + 1;
         }
@@ -487,6 +530,152 @@ inline result<std::vector<std::string>> parse_key_path(std::string_view raw) {
  */
 inline bool ascii_digit(char value) {
     return value >= '0' && value <= '9';
+}
+
+inline bool number_digit(char value, int base) {
+    if (ascii_digit(value)) {
+        return value - '0' < base;
+    }
+    if (base == 16 && value >= 'a' && value <= 'f') {
+        return true;
+    }
+    if (base == 16 && value >= 'A' && value <= 'F') {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief Validate TOML number grammar and remove legal digit separators.
+ *
+ * `from_chars` deliberately accepts a wider grammar than TOML (for example
+ * leading zeroes and a missing digit after a decimal point), so the lexical
+ * checks live here instead of relying on the library conversion routine.
+ */
+inline result<std::string> normalize_number_lexeme(std::string_view text,
+                                                   bool& floating, int& base) {
+    floating = false;
+    base = 10;
+    if (text.empty()) {
+        return std::unexpected(std::string("empty TOML number"));
+    }
+
+    std::size_t start = 0;
+    if (text.front() == '+' || text.front() == '-') {
+        start = 1;
+        if (start == text.size()) {
+            return std::unexpected(std::string("invalid TOML number"));
+        }
+    }
+    const auto unsigned_text = text.substr(start);
+    const bool prefixed = unsigned_text.size() >= 2 && unsigned_text[0] == '0' &&
+                          (unsigned_text[1] == 'x' || unsigned_text[1] == 'X' ||
+                           unsigned_text[1] == 'o' || unsigned_text[1] == 'O' ||
+                           unsigned_text[1] == 'b' || unsigned_text[1] == 'B');
+    if (prefixed) {
+        switch (unsigned_text[1]) {
+            case 'x': case 'X': base = 16; break;
+            case 'o': case 'O': base = 8; break;
+            case 'b': case 'B': base = 2; break;
+            default: break;
+        }
+        const auto digits = unsigned_text.substr(2);
+        if (digits.empty()) {
+            return std::unexpected(std::string("prefixed TOML integer has no digits"));
+        }
+        for (std::size_t index = 0; index < digits.size(); ++index) {
+            if (digits[index] == '_') {
+                if (index == 0 || index + 1 == digits.size() ||
+                    !number_digit(digits[index - 1], base) ||
+                    !number_digit(digits[index + 1], base)) {
+                    return std::unexpected(std::string("invalid underscore in TOML number"));
+                }
+            } else if (!number_digit(digits[index], base)) {
+                return std::unexpected(std::string("invalid TOML integer"));
+            }
+        }
+    } else {
+        for (std::size_t index = 0; index < unsigned_text.size(); ++index) {
+            const char character = unsigned_text[index];
+            if (character == '_') {
+                if (index == 0 || index + 1 == unsigned_text.size() ||
+                    !ascii_digit(unsigned_text[index - 1]) ||
+                    !ascii_digit(unsigned_text[index + 1])) {
+                    return std::unexpected(std::string("invalid underscore in TOML number"));
+                }
+            } else if (!ascii_digit(character) && character != '.' && character != 'e' &&
+                       character != 'E' && character != '+' && character != '-') {
+                return std::unexpected(std::string("invalid TOML number"));
+            }
+        }
+    }
+
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (const char character : text) {
+        if (character != '_') {
+            normalized.push_back(character);
+        }
+    }
+    if (prefixed) {
+        return normalized;
+    }
+
+    std::string_view value = normalized;
+    if (!value.empty() && (value.front() == '+' || value.front() == '-')) {
+        value.remove_prefix(1);
+    }
+    const auto exponent = value.find_first_of("eE");
+    const auto dot = value.find('.');
+    if (dot != std::string_view::npos && exponent != std::string_view::npos && dot > exponent) {
+        return std::unexpected(std::string("invalid TOML floating-point value"));
+    }
+    const auto integer_end = std::min(dot, exponent);
+    const auto integer_part = value.substr(0, integer_end);
+    if (integer_part.empty()) {
+        return std::unexpected(std::string("invalid TOML floating-point value"));
+    }
+    for (const char character : integer_part) {
+        if (!ascii_digit(character)) {
+            return std::unexpected(std::string("invalid TOML floating-point value"));
+        }
+    }
+    if (integer_part.size() > 1 && integer_part.front() == '0') {
+        return std::unexpected(std::string("leading zero in TOML number"));
+    }
+    if (dot != std::string_view::npos) {
+        const auto fraction_end = exponent == std::string_view::npos ? value.size() : exponent;
+        const auto fraction = value.substr(dot + 1, fraction_end - dot - 1);
+        if (fraction.empty()) {
+            return std::unexpected(std::string("TOML floating-point value has no fraction"));
+        }
+        for (const char character : fraction) {
+            if (!ascii_digit(character)) {
+                return std::unexpected(std::string("invalid TOML floating-point value"));
+            }
+        }
+        floating = true;
+    }
+    if (exponent != std::string_view::npos) {
+        auto exponent_part = value.substr(exponent + 1);
+        if (!exponent_part.empty() &&
+            (exponent_part.front() == '+' || exponent_part.front() == '-')) {
+            exponent_part.remove_prefix(1);
+        }
+        if (exponent_part.empty()) {
+            return std::unexpected(std::string("TOML exponent has no digits"));
+        }
+        for (const char character : exponent_part) {
+            if (!ascii_digit(character)) {
+                return std::unexpected(std::string("invalid TOML exponent"));
+            }
+        }
+        floating = true;
+    }
+    if (!floating && integer_part.size() > 1 && integer_part.front() == '0') {
+        return std::unexpected(std::string("leading zero in TOML number"));
+    }
+    return normalized;
 }
 
 /**
@@ -717,8 +906,12 @@ inline bool insert_value_at(node::table& root,
     node::table* table = &root;
     for (std::size_t index = 0; index + 1 < path.size(); ++index) {
         auto [iterator, inserted] = table->try_emplace(path[index], node{node::table{}});
-        if (!inserted && !std::holds_alternative<node::table>(iterator->second.value)) {
+        if (!inserted && (iterator->second.inline_table ||
+                          !std::holds_alternative<node::table>(iterator->second.value))) {
             return false;
+        }
+        if (inserted) {
+            iterator->second.definition = node::table_definition::dotted_key;
         }
         table = &std::get<node::table>(iterator->second.value);
     }
@@ -730,6 +923,12 @@ inline bool insert_value_at(node::table& root,
  *
  * 解析器维护输入视图和当前偏移量，供文档解析器在赋值语句中复用。
  */
+struct parse_context {
+    const parse_options& options;
+    std::size_t depth = 0;
+    std::size_t nodes = 0;
+};
+
 class value_parser {
 public:
     /**
@@ -737,8 +936,9 @@ public:
      * @param text 待解析的完整文本。
      * @param position 初始读取位置，默认为文本开头。
      */
-    explicit value_parser(std::string_view text, std::size_t position = 0)
-        : text_(text), position_(position) {}
+    explicit value_parser(std::string_view text, std::size_t position,
+                          bool allow_newlines, parse_context& context)
+        : text_(text), position_(position), allow_newlines_(allow_newlines), context_(context) {}
 
     /**
      * @brief 解析一个值并确保后面没有多余文本。
@@ -776,7 +976,8 @@ private:
     /** @brief 跳过所有空白字符。 */
     void skip_space() {
         while (position_ < text_.size() &&
-               std::isspace(static_cast<unsigned char>(text_[position_]))) {
+               (allow_newlines_ ? toml_whitespace(text_[position_])
+                                : text_[position_] == ' ' || text_[position_] == '\t')) {
             ++position_;
         }
     }
@@ -791,6 +992,10 @@ private:
 
     /** @brief 跳过空白和以 `#` 开头的注释。 */
     void skip_trivia() {
+        if (!allow_newlines_) {
+            skip_inline_space();
+            return;
+        }
         while (true) {
             skip_space();
             if (position_ >= text_.size() || text_[position_] != '#') {
@@ -877,6 +1082,34 @@ private:
         if (position_ >= text_.size()) {
             return std::unexpected(std::string("missing TOML value"));
         }
+        if (context_.depth >= context_.options.max_depth) {
+            return std::unexpected(std::string("TOML nesting depth exceeds configured limit"));
+        }
+        ++context_.depth;
+        struct depth_guard {
+            std::size_t& depth;
+            ~depth_guard() { --depth; }
+        } guard{context_.depth};
+        auto parsed = parse_value_impl();
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        if (context_.nodes >= context_.options.max_nodes) {
+            return std::unexpected(std::string("TOML node count exceeds configured limit"));
+        }
+        ++context_.nodes;
+        if (const auto* string = std::get_if<std::string>(&parsed->value);
+            string != nullptr && string->size() > context_.options.max_string_bytes) {
+            return std::unexpected(std::string("TOML string exceeds configured size limit"));
+        }
+        return parsed;
+    }
+
+    result<node> parse_value_impl() {
+        skip_space();
+        if (position_ >= text_.size()) {
+            return std::unexpected(std::string("missing TOML value"));
+        }
 
         switch (text_[position_]) {
             case '"':
@@ -904,6 +1137,9 @@ private:
         while (position_ < text_.size()) {
             const char character = text_[position_++];
             if (character == '"') {
+                if (!valid_utf8(value)) {
+                    return std::unexpected(std::string("invalid UTF-8 in TOML string"));
+                }
                 return node{std::move(value)};
             }
             if (character == '\\') {
@@ -914,6 +1150,8 @@ private:
             } else if (character == '\n' || character == '\r') {
                 return std::unexpected(std::string("newline in basic TOML string"));
             } else if (static_cast<unsigned char>(character) < 0x20 && character != '\t') {
+                return std::unexpected(std::string("control character in basic TOML string"));
+            } else if (static_cast<unsigned char>(character) == 0x7f) {
                 return std::unexpected(std::string("control character in basic TOML string"));
             } else {
                 value.push_back(character);
@@ -932,10 +1170,19 @@ private:
         while (position_ < text_.size()) {
             const char character = text_[position_++];
             if (character == '\'') {
+                if (!valid_utf8(value)) {
+                    return std::unexpected(std::string("invalid UTF-8 in TOML string"));
+                }
                 return node{std::move(value)};
             }
             if (character == '\n' || character == '\r') {
                 return std::unexpected(std::string("newline in literal TOML string"));
+            }
+            if (static_cast<unsigned char>(character) < 0x20 && character != '\t') {
+                return std::unexpected(std::string("control character in literal TOML string"));
+            }
+            if (static_cast<unsigned char>(character) == 0x7f) {
+                return std::unexpected(std::string("control character in literal TOML string"));
             }
             value.push_back(character);
         }
@@ -956,16 +1203,31 @@ private:
         std::string value;
         while (position_ < text_.size()) {
             if (starts_with("\"\"\"")) {
+                std::size_t run = 0;
+                while (position_ + run < text_.size() && text_[position_ + run] == '"') {
+                    ++run;
+                }
+                if (run == 3) {
+                    position_ += 3;
+                    if (!valid_utf8(value)) {
+                        return std::unexpected(std::string("invalid UTF-8 in TOML string"));
+                    }
+                    return node{std::move(value)};
+                }
+                if (run == 4 || run == 5) {
+                    value.append(run - 3, '"');
+                    position_ += run;
+                    continue;
+                }
                 position_ += 3;
-                return node{std::move(value)};
+                return std::unexpected(std::string("invalid quote sequence in multiline TOML string"));
             }
             const char character = text_[position_++];
             if (character == '\\') {
                 if (position_ < text_.size() &&
                     (text_[position_] == '\n' || text_[position_] == '\r')) {
                     consume_line_break();
-                    while (position_ < text_.size() &&
-                           std::isspace(static_cast<unsigned char>(text_[position_]))) {
+                    while (position_ < text_.size() && toml_whitespace(text_[position_])) {
                         ++position_;
                     }
                     continue;
@@ -974,6 +1236,16 @@ private:
                 if (!escaped) {
                     return std::unexpected(escaped.error());
                 }
+            } else if (character == '\r') {
+                consume_line_break();
+                value.push_back('\n');
+            } else if (character == '\n') {
+                value.push_back('\n');
+            } else if ((static_cast<unsigned char>(character) < 0x20 &&
+                        character != '\t') ||
+                       static_cast<unsigned char>(character) == 0x7f) {
+                return std::unexpected(
+                    std::string("control character in multiline basic TOML string"));
             } else {
                 value.push_back(character);
             }
@@ -994,11 +1266,42 @@ private:
 
         std::string value;
         while (position_ < text_.size()) {
-            if (starts_with("'''") ) {
+            if (starts_with("'''")) {
+                std::size_t run = 0;
+                while (position_ + run < text_.size() && text_[position_ + run] == '\'') {
+                    ++run;
+                }
+                if (run == 3) {
+                    position_ += 3;
+                    if (!valid_utf8(value)) {
+                        return std::unexpected(std::string("invalid UTF-8 in TOML string"));
+                    }
+                    return node{std::move(value)};
+                }
+                if (run == 4 || run == 5) {
+                    value.append(run - 3, '\'');
+                    position_ += run;
+                    continue;
+                }
                 position_ += 3;
-                return node{std::move(value)};
+                return std::unexpected(std::string("invalid quote sequence in multiline TOML string"));
             }
-            value.push_back(text_[position_++]);
+            if (text_[position_] == '\r') {
+                consume_line_break();
+                value.push_back('\n');
+            } else if (text_[position_] == '\n') {
+                ++position_;
+                value.push_back('\n');
+            } else if (static_cast<unsigned char>(text_[position_]) < 0x20 &&
+                       text_[position_] != '\t') {
+                return std::unexpected(
+                    std::string("control character in multiline literal TOML string"));
+            } else if (static_cast<unsigned char>(text_[position_]) == 0x7f) {
+                return std::unexpected(
+                    std::string("control character in multiline literal TOML string"));
+            } else {
+                value.push_back(text_[position_++]);
+            }
         }
         return std::unexpected(std::string("unterminated multiline literal TOML string"));
     }
@@ -1009,6 +1312,12 @@ private:
      */
     result<node> parse_array() {
         ++position_;
+        struct newline_guard {
+            bool& target;
+            bool previous;
+            ~newline_guard() { target = previous; }
+        } guard{allow_newlines_, allow_newlines_};
+        allow_newlines_ = true;
         node::array values;
         skip_trivia();
         if (position_ < text_.size() && text_[position_] == ']') {
@@ -1020,6 +1329,9 @@ private:
             auto value = parse_value();
             if (!value) {
                 return std::unexpected(value.error());
+            }
+            if (values.size() >= context_.options.max_array_items) {
+                return std::unexpected(std::string("TOML array item count exceeds configured limit"));
             }
             values.push_back(std::move(*value));
             skip_trivia();
@@ -1054,7 +1366,9 @@ private:
         skip_inline_space();
         if (position_ < text_.size() && text_[position_] == '}') {
             ++position_;
-            return node{std::move(values)};
+            node result{std::move(values)};
+            mark_inline_table(result);
+            return result;
         }
 
         while (position_ < text_.size()) {
@@ -1091,13 +1405,16 @@ private:
             if (position_ >= text_.size() || text_[position_] != '=') {
                 return std::unexpected(std::string("expected '=' in inline TOML table"));
             }
-            auto path = parse_key_path(text_.substr(key_start, position_ - key_start));
+            auto path = parse_key_path(text_.substr(key_start, position_ - key_start), context_.options.max_key_bytes, context_.options.max_depth);
             if (!path || path->empty()) {
                 return std::unexpected(path ? std::string("empty inline TOML key")
                                              : path.error());
             }
             ++position_;
+            const bool previous_allow_newlines = allow_newlines_;
+            allow_newlines_ = false;
             auto value = parse_value();
+            allow_newlines_ = previous_allow_newlines;
             if (!value) {
                 return std::unexpected(value.error());
             }
@@ -1110,7 +1427,9 @@ private:
             }
             if (text_[position_] == '}') {
                 ++position_;
-                return node{std::move(values)};
+                node result{std::move(values)};
+                mark_inline_table(result);
+                return result;
             }
             if (text_[position_] != ',') {
                 return std::unexpected(std::string("expected ',' or '}' in inline TOML table"));
@@ -1157,40 +1476,24 @@ private:
         if (date_like || time_like) {
             return parse_temporal_value(atom);
         }
-        if (atom.front() == '_' || atom.back() == '_' || atom.find("__") != std::string_view::npos) {
-            return std::unexpected(std::string("invalid underscore in TOML number"));
-        }
-
-        std::string normalized;
-        normalized.reserve(atom.size());
-        for (const char character : atom) {
-            if (character != '_') {
-                normalized.push_back(character);
-            }
-        }
-
-        if (normalized == "inf" || normalized == "+inf") {
+        if (atom == "inf" || atom == "+inf") {
             return node{std::numeric_limits<double>::infinity()};
         }
-        if (normalized == "-inf") {
+        if (atom == "-inf") {
             return node{-std::numeric_limits<double>::infinity()};
         }
-        if (normalized == "nan" || normalized == "+nan" || normalized == "-nan") {
+        if (atom == "nan" || atom == "+nan" || atom == "-nan") {
             return node{std::numeric_limits<double>::quiet_NaN()};
         }
-
-        std::string_view numeric_text = normalized;
-        if (!numeric_text.empty() &&
-            (numeric_text.front() == '+' || numeric_text.front() == '-')) {
-            numeric_text.remove_prefix(1);
+        bool lexical_floating = false;
+        int lexical_base = 10;
+        auto normalized_result = normalize_number_lexeme(atom, lexical_floating, lexical_base);
+        if (!normalized_result) {
+            return std::unexpected(normalized_result.error());
         }
-        const bool prefixed_integer =
-            numeric_text.size() >= 2 && numeric_text.front() == '0' &&
-            (numeric_text[1] == 'x' || numeric_text[1] == 'X' ||
-             numeric_text[1] == 'o' || numeric_text[1] == 'O' ||
-             numeric_text[1] == 'b' || numeric_text[1] == 'B');
-        const bool floating = !prefixed_integer &&
-                              normalized.find_first_of(".eE") != std::string::npos;
+        const std::string& normalized = *normalized_result;
+
+        const bool floating = lexical_floating;
         if (floating) {
             std::string_view floating_text = normalized;
             // `from_chars` 有意支持前导负号，但不支持前导正号。
@@ -1214,16 +1517,8 @@ private:
             negative = digits.front() == '-';
             digits.remove_prefix(1);
         }
-        int base = 10;
-        if (digits.size() >= 2 && digits[0] == '0' &&
-            (digits[1] == 'x' || digits[1] == 'X' || digits[1] == 'o' ||
-             digits[1] == 'O' || digits[1] == 'b' || digits[1] == 'B')) {
-            switch (digits[1]) {
-                case 'x': case 'X': base = 16; break;
-                case 'o': case 'O': base = 8; break;
-                case 'b': case 'B': base = 2; break;
-                default: break;
-            }
+        const int base = lexical_base;
+        if (lexical_base != 10) {
             digits.remove_prefix(2);
         }
         if (digits.empty()) {
@@ -1257,6 +1552,8 @@ private:
 
     std::string_view text_;
     std::size_t position_ = 0;
+    bool allow_newlines_ = true;
+    parse_context& context_;
 };
 
 /**
@@ -1268,13 +1565,17 @@ public:
      * @brief 构造文档解析器。
      * @param text 待解析的 TOML 文档文本。
      */
-    explicit document_parser(std::string_view text) : text_(text) {}
+    explicit document_parser(std::string_view text, const parse_options& options)
+        : text_(text), options_(options), context_{options} {}
 
     /**
      * @brief 解析完整文档。
      * @return 文档根表，或包含位置上下文的语法错误。
      */
     result<node::table> parse() {
+        if (!valid_utf8(text_)) {
+            return std::unexpected(std::string("invalid UTF-8 in TOML document"));
+        }
         node::table root;
         node::table* current_table = &root;
         while (true) {
@@ -1302,8 +1603,7 @@ private:
     /** @brief 跳过文档中的空白和注释。 */
     void skip_trivia() {
         while (true) {
-            while (position_ < text_.size() &&
-                   std::isspace(static_cast<unsigned char>(text_[position_]))) {
+            while (position_ < text_.size() && toml_whitespace(text_[position_])) {
                 ++position_;
             }
             if (position_ == text_.size() || text_[position_] != '#') {
@@ -1426,7 +1726,7 @@ private:
         if (content_end == std::string_view::npos) {
             return std::unexpected(std::string("unterminated TOML table header"));
         }
-        auto path = parse_key_path(text_.substr(content_start, content_end - content_start));
+        auto path = parse_key_path(text_.substr(content_start, content_end - content_start), options_.max_key_bytes, options_.max_depth);
         if (!path || path->empty()) {
             return std::unexpected(path ? std::string("empty TOML table header")
                                          : path.error());
@@ -1449,13 +1749,21 @@ private:
         if (equals == std::string_view::npos) {
             return std::unexpected(std::string("expected '=' in TOML assignment"));
         }
-        auto path = parse_key_path(text_.substr(position_, equals - position_));
+        auto path = parse_key_path(text_.substr(position_, equals - position_), options_.max_key_bytes, options_.max_depth);
         if (!path || path->empty()) {
             return std::unexpected(path ? std::string("empty TOML key")
                                          : path.error());
         }
         position_ = equals + 1;
-        value_parser parser(text_, position_);
+        while (position_ < text_.size() &&
+               (text_[position_] == ' ' || text_[position_] == '\t')) {
+            ++position_;
+        }
+        if (position_ >= text_.size() || text_[position_] == '\n' ||
+            text_[position_] == '\r') {
+            return std::unexpected(std::string("missing TOML value"));
+        }
+        value_parser parser(text_, position_, true, context_);
         auto value = parser.parse_one();
         if (!value) {
             return std::unexpected(value.error());
@@ -1477,22 +1785,34 @@ private:
      * @param path 表的键路径。
      * @return 目标表指针，或与标量值冲突的错误。
      */
-    static result<node::table*> open_table(node::table& root,
-                                            const std::vector<std::string>& path) {
+    static result<node::table*> open_table(
+        node::table& root, const std::vector<std::string>& path,
+        bool allow_terminal_array_table = false,
+        bool define_terminal_table = true) {
         node::table* table = &root;
-        for (const auto& part : path) {
+        for (std::size_t index = 0; index < path.size(); ++index) {
+            const auto& part = path[index];
             auto [iterator, inserted] = table->try_emplace(part, node{node::table{}});
-            if (std::holds_alternative<node::table>(iterator->second.value)) {
+            if (std::holds_alternative<node::table>(iterator->second.value) &&
+                !iterator->second.inline_table) {
+                if (define_terminal_table && !inserted && index + 1 == path.size() &&
+                    iterator->second.definition != node::table_definition::implicit) {
+                    return std::unexpected(std::string("duplicate TOML table definition"));
+                }
+                if (define_terminal_table && index + 1 == path.size()) {
+                    iterator->second.definition = node::table_definition::explicit_table;
+                }
                 table = &std::get<node::table>(iterator->second.value);
                 continue;
             }
             if (auto* array = std::get_if<node::array>(&iterator->second.value);
-                array != nullptr && !array->empty() &&
+                iterator->second.array_table && array != nullptr && !array->empty() &&
+                (index + 1 < path.size() || allow_terminal_array_table) &&
                 std::holds_alternative<node::table>(array->back().value)) {
                 table = &std::get<node::table>(array->back().value);
                 continue;
             }
-            return std::unexpected(std::string("TOML table conflicts with a scalar value"));
+            return std::unexpected(std::string("TOML table conflicts with an existing value"));
         }
         return table;
     }
@@ -1509,20 +1829,24 @@ private:
             return std::unexpected(std::string("empty TOML array-table header"));
         }
         std::vector<std::string> parent_path(path.begin(), path.end() - 1);
-        auto parent = open_table(root, parent_path);
+        auto parent = open_table(root, parent_path, true, false);
         if (!parent) {
             return std::unexpected(parent.error());
         }
         auto [iterator, inserted] = (*parent)->try_emplace(path.back(), node{node::array{}});
-        if (!std::holds_alternative<node::array>(iterator->second.value)) {
+        if (!inserted && !iterator->second.array_table) {
             return std::unexpected(std::string("TOML array-table conflicts with another value"));
         }
+        iterator->second.array_table = true;
         auto& values = std::get<node::array>(iterator->second.value);
         values.emplace_back(node::table{});
+        values.back().definition = node::table_definition::array_element;
         return &std::get<node::table>(values.back().value);
     }
 
     std::string_view text_;
+    const parse_options& options_;
+    parse_context context_;
     std::size_t position_ = 0;
 };
 
@@ -1543,7 +1867,7 @@ result<node> encode_value(const T& input);
  * @return 解码后的 C++ 值，或类型/范围不匹配错误。
  */
 template <class T>
-result<T> decode_value(const node& input, std::string_view path);
+result<T> decode_value(const node& input, std::string_view path, const parse_options& options);
 
 /**
  * @brief 将 C++ 值递归编码为内部 TOML 节点。
@@ -1568,7 +1892,7 @@ result<node> encode_value(const T& input) {
         if (!std::holds_alternative<node::table>(encoded->value)) {
             return std::unexpected(std::string("toml::inline_table requires a reflected struct"));
         }
-        encoded->inline_table = true;
+        mark_inline_table(*encoded);
         return encoded;
     } else if constexpr (std::same_as<U, date>) {
         if (!valid_date_value(input)) {
@@ -1593,8 +1917,14 @@ result<node> encode_value(const T& input) {
         }
         return node{input};
     } else if constexpr (std::same_as<U, std::string>) {
+        if (!valid_utf8(input)) {
+            return std::unexpected(std::string("invalid UTF-8 in TOML string"));
+        }
         return node{input};
     } else if constexpr (std::same_as<U, std::string_view>) {
+        if (!valid_utf8(input)) {
+            return std::unexpected(std::string("invalid UTF-8 in TOML string"));
+        }
         return node{std::string(input)};
     } else if constexpr (std::same_as<U, bool>) {
         return node{input};
@@ -1642,7 +1972,11 @@ result<node> encode_value(const T& input) {
             }
             values.push_back(std::move(*encoded));
         }
-        return node{std::move(values)};
+        node output{std::move(values)};
+        if constexpr (reflectable<typename vector_traits<U>::value_type>) {
+            output.array_table = true;
+        }
+        return output;
     } else if constexpr (array_traits<U>::value) {
         node::array values;
         for (const auto& element : input) {
@@ -1655,10 +1989,17 @@ result<node> encode_value(const T& input) {
             }
             values.push_back(std::move(*encoded));
         }
-        return node{std::move(values)};
+        node output{std::move(values)};
+        if constexpr (reflectable<typename array_traits<U>::value_type>) {
+            output.array_table = true;
+        }
+        return output;
     } else if constexpr (map_traits<U>::value) {
         node::table values;
         for (const auto& [key, element] : input) {
+            if (!valid_utf8(key)) {
+                return std::unexpected(std::string("invalid UTF-8 in TOML key"));
+            }
             auto encoded = encode_value(element);
             if (!encoded) {
                 return std::unexpected(encoded.error());
@@ -1679,6 +2020,11 @@ result<node> encode_value(const T& input) {
             }
             const auto& member = descriptor.get(object);
             using Member = bare_t<decltype(member)>;
+            if (!valid_utf8(descriptor.name)) {
+                failed = true;
+                failure = "invalid UTF-8 in reflected TOML key";
+                return;
+            }
             if constexpr (optional_traits<Member>::value) {
                 if (!member) {
                     return;
@@ -1717,7 +2063,9 @@ inline bool bare_key(std::string_view key) {
         return false;
     }
     for (const char character : key) {
-        if (!(std::isalnum(static_cast<unsigned char>(character)) ||
+        if (!((character >= 'A' && character <= 'Z') ||
+              (character >= 'a' && character <= 'z') ||
+              (character >= '0' && character <= '9') ||
               character == '_' || character == '-')) {
             return false;
         }
@@ -1744,7 +2092,18 @@ inline std::string format_key(std::string_view key) {
             case '\n': result += "\\n"; break;
             case '\r': result += "\\r"; break;
             case '\t': result += "\\t"; break;
-            default: result.push_back(character); break;
+            default:
+                if (static_cast<unsigned char>(character) < 0x20 ||
+                    static_cast<unsigned char>(character) == 0x7f) {
+                    constexpr char hex[] = "0123456789abcdef";
+                    const auto byte = static_cast<unsigned char>(character);
+                    result += "\\u00";
+                    result.push_back(hex[byte >> 4]);
+                    result.push_back(hex[byte & 0x0f]);
+                } else {
+                    result.push_back(character);
+                }
+                break;
         }
     }
     result.push_back('"');
@@ -1891,7 +2250,18 @@ inline bool append_inline(const node& value, std::string& output,
                         case '\n': output += "\\n"; break;
                         case '\r': output += "\\r"; break;
                         case '\t': output += "\\t"; break;
-                        default: output.push_back(character); break;
+                        default:
+                            if (static_cast<unsigned char>(character) < 0x20 ||
+                                static_cast<unsigned char>(character) == 0x7f) {
+                                constexpr char hex[] = "0123456789abcdef";
+                                const auto byte = static_cast<unsigned char>(character);
+                                output += "\\u00";
+                                output.push_back(hex[byte >> 4]);
+                                output.push_back(hex[byte & 0x0f]);
+                            } else {
+                                output.push_back(character);
+                            }
+                            break;
                     }
                 }
                 output.push_back('"');
@@ -1951,6 +2321,9 @@ inline void append_key_path(std::string_view prefix, std::string_view key,
  * @return 数组表底层数组指针；不是数组表或为空时返回 `nullptr`。
  */
 inline const node::array* table_array(const node& value) {
+    if (!value.array_table) {
+        return nullptr;
+    }
     const auto* values = std::get_if<node::array>(&value.value);
     if (values == nullptr || values->empty()) {
         return nullptr;
@@ -2033,7 +2406,7 @@ inline bool append_table(const node::table& table, std::string_view prefix,
  * @return 解码后的 C++ 值，或类型/范围不匹配错误。
  */
 template <class T>
-result<T> decode_value(const node& input, std::string_view path) {
+result<T> decode_value(const node& input, std::string_view path, const parse_options& options) {
     using U = bare_t<T>;
     const auto where = path.empty() ? std::string("value") : std::string(path);
 
@@ -2041,13 +2414,13 @@ result<T> decode_value(const node& input, std::string_view path) {
         if (std::holds_alternative<std::monostate>(input.value)) {
             return U{};
         }
-        auto decoded = decode_value<typename optional_traits<U>::value_type>(input, path);
+        auto decoded = decode_value<typename optional_traits<U>::value_type>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
         return U{std::move(*decoded)};
     } else if constexpr (inline_table_traits<U>::value) {
-        auto decoded = decode_value<typename inline_table_traits<U>::value_type>(input, path);
+        auto decoded = decode_value<typename inline_table_traits<U>::value_type>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
@@ -2118,7 +2491,7 @@ result<T> decode_value(const node& input, std::string_view path) {
         return std::unexpected(where + " must be a TOML number");
     } else if constexpr (std::is_enum_v<U>) {
         using Underlying = std::underlying_type_t<U>;
-        auto decoded = decode_value<Underlying>(input, path);
+        auto decoded = decode_value<Underlying>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
@@ -2134,7 +2507,7 @@ result<T> decode_value(const node& input, std::string_view path) {
         }
         for (std::size_t index = 0; index < values->size(); ++index) {
             auto decoded = decode_value<typename vector_traits<U>::value_type>(
-                (*values)[index], where + "[" + std::to_string(index) + "]");
+                (*values)[index], where + "[" + std::to_string(index) + "]", options);
             if (!decoded) {
                 return std::unexpected(decoded.error());
             }
@@ -2149,7 +2522,7 @@ result<T> decode_value(const node& input, std::string_view path) {
         U output{};
         for (std::size_t index = 0; index < values->size(); ++index) {
             auto decoded = decode_value<typename array_traits<U>::value_type>(
-                (*values)[index], where + "[" + std::to_string(index) + "]");
+                (*values)[index], where + "[" + std::to_string(index) + "]", options);
             if (!decoded) {
                 return std::unexpected(decoded.error());
             }
@@ -2164,7 +2537,7 @@ result<T> decode_value(const node& input, std::string_view path) {
         U output;
         for (const auto& [key, value] : *values) {
             auto decoded = decode_value<typename map_traits<U>::mapped_type>(
-                value, where + "." + key);
+                value, where + "." + key, options);
             if (!decoded) {
                 return std::unexpected(decoded.error());
             }
@@ -2206,7 +2579,7 @@ result<T> decode_value(const node& input, std::string_view path) {
                     }
                     auto decoded = decode_value<Member>(
                         iterator->second,
-                        where + "." + std::string(descriptor.name));
+                        where + "." + std::string(descriptor.name), options);
                     if (!decoded) {
                         failed = true;
                         failure = decoded.error();
@@ -2215,6 +2588,20 @@ result<T> decode_value(const node& input, std::string_view path) {
                     descriptor.get(object) = std::move(*decoded);
                 }
             });
+            if (!failed && options.unknown_fields == unknown_field_policy::reject) {
+                for (const auto& [key, ignored] : *values) {
+                    bool known = false;
+                    std::apply([&](const auto&... descriptor) {
+                        known = ((key == descriptor.name) || ...);
+                    }, reflect::fields(output));
+                    if (!known) {
+                        failed = true;
+                        failure = where + " contains unknown field '" + key + "'";
+                        break;
+                    }
+                    static_cast<void>(ignored);
+                }
+            }
             if (failed) {
                 return std::unexpected(std::move(failure));
             }
@@ -2234,21 +2621,33 @@ result<T> decode_value(const node& input, std::string_view path) {
  * @return TOML 文本，或类型不受支持、值非法等错误。
  */
 template <class T>
-result<std::string> serialize(const T& value) {
-    auto encoded = detail::encode_value(value);
-    if (!encoded) {
-        return std::unexpected(encoded.error());
+result<std::string> serialize(const T& value,
+                              const serialize_options& options = {}) {
+    try {
+        auto encoded = detail::encode_value(value);
+        if (!encoded) {
+            return std::unexpected(encoded.error());
+        }
+        const auto* root = std::get_if<typename detail::node::table>(&encoded->value);
+        if (root == nullptr) {
+            return std::unexpected(std::string("TOML serialization requires a reflected struct/table at the root"));
+        }
+        std::string output;
+        std::string failure;
+        if (!detail::append_table(*root, {}, output, failure)) {
+            return std::unexpected(std::move(failure));
+        }
+        if (output.size() > options.max_output_bytes) {
+            return std::unexpected(std::string("TOML output exceeds configured size limit"));
+        }
+        return output;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(std::string("TOML operation exhausted memory"));
+    } catch (const std::exception& error) {
+        return std::unexpected(std::string("TOML operation failed: ") + error.what());
+    } catch (...) {
+        return std::unexpected(std::string("TOML operation failed with an unknown exception"));
     }
-    const auto* root = std::get_if<typename detail::node::table>(&encoded->value);
-    if (root == nullptr) {
-        return std::unexpected(std::string("TOML serialization requires a reflected struct/table at the root"));
-    }
-    std::string output;
-    std::string failure;
-    if (!detail::append_table(*root, {}, output, failure)) {
-        return std::unexpected(std::move(failure));
-    }
-    return output;
 }
 
 /**
@@ -2258,8 +2657,8 @@ result<std::string> serialize(const T& value) {
  * @return 与 `serialize` 相同的 TOML 文本或错误结果。
  */
 template <class T>
-result<std::string> try_serialize(const T& value) {
-    return serialize(value);
+result<std::string> try_serialize(const T& value, const serialize_options& options = {}) {
+    return serialize(value, options);
 }
 
 /**
@@ -2269,14 +2668,26 @@ result<std::string> try_serialize(const T& value) {
  * @return 解码后的对象，或语法、类型及范围错误。
  */
 template <class T>
-result<T> deserialize(std::string_view text) {
-    detail::document_parser parser(text);
-    auto parsed = parser.parse();
-    if (!parsed) {
-        return std::unexpected(parsed.error());
+result<T> deserialize(std::string_view text,
+                      const parse_options& options = {}) {
+    try {
+        if (text.size() > options.max_input_bytes) {
+            return std::unexpected(std::string("TOML input exceeds configured size limit"));
+        }
+        detail::document_parser parser(text, options);
+        auto parsed = parser.parse();
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        detail::node root{std::move(*parsed)};
+        return detail::decode_value<T>(root, {}, options);
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(std::string("TOML operation exhausted memory"));
+    } catch (const std::exception& error) {
+        return std::unexpected(std::string("TOML operation failed: ") + error.what());
+    } catch (...) {
+        return std::unexpected(std::string("TOML operation failed with an unknown exception"));
     }
-    detail::node root{std::move(*parsed)};
-    return detail::decode_value<T>(root, {});
 }
 
 /**
@@ -2286,8 +2697,8 @@ result<T> deserialize(std::string_view text) {
  * @return 与 `deserialize<T>` 相同的结果。
  */
 template <class T>
-result<T> deserializee(std::string_view text) {
-    return deserialize<T>(text);
+result<T> deserializee(std::string_view text, const parse_options& options = {}) {
+    return deserialize<T>(text, options);
 }
 
 /**
@@ -2297,8 +2708,8 @@ result<T> deserializee(std::string_view text) {
  * @return 与 `deserialize<T>` 相同的结果。
  */
 template <class T>
-result<T> deSerialize(std::string_view text) {
-    return deserialize<T>(text);
+result<T> deSerialize(std::string_view text, const parse_options& options = {}) {
+    return deserialize<T>(text, options);
 }
 
 }  // 命名空间 toml

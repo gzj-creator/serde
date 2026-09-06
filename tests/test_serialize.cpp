@@ -1,7 +1,7 @@
 import std;
 import toml;
 
-#include "../src/toml/toml_reflect.hpp"
+#include "../src/reflect/reflect_macros.hpp"
 
 namespace {
 
@@ -10,21 +10,33 @@ struct InlineSettings {
     std::string name;
 };
 
-TOML_REFLECT_MEMBERS(InlineSettings, count, name)
+#define SERDE_FIELDS_13(X) \
+    X(count) \
+    X(name)
+REFLECT_FIELDS(InlineSettings, SERDE_FIELDS_13)
+#undef SERDE_FIELDS_13
 
 struct Service {
     std::string host;
     int port{};
 };
 
-TOML_REFLECT_MEMBERS(Service, host, port)
+#define SERDE_FIELDS_14(X) \
+    X(host) \
+    X(port)
+REFLECT_FIELDS(Service, SERDE_FIELDS_14)
+#undef SERDE_FIELDS_14
 
 struct Product {
     std::string name;
     std::int64_t sku{};
 };
 
-TOML_REFLECT_MEMBERS(Product, name, sku)
+#define SERDE_FIELDS_15(X) \
+    X(name) \
+    X(sku)
+REFLECT_FIELDS(Product, SERDE_FIELDS_15)
+#undef SERDE_FIELDS_15
 
 struct WriteDocument {
     std::string quoted_key;
@@ -65,7 +77,7 @@ struct WriteDocument {
     X(labels, "labels")                              \
     X(products, "products")
 
-TOML_REFLECT_NAMED(WriteDocument, WRITE_DOCUMENT_FIELDS)
+REFLECT_FIELDS(WriteDocument, WRITE_DOCUMENT_FIELDS)
 
 #undef WRITE_DOCUMENT_FIELDS
 

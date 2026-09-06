@@ -1,7 +1,7 @@
 import std;
 import toml;
 
-#include "../src/toml/toml_reflect.hpp"
+#include "../src/reflect/reflect_macros.hpp"
 
 namespace {
 
@@ -16,7 +16,10 @@ struct NestedFlag {
     bool operator==(const NestedFlag& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(NestedFlag, enabled)
+#define SERDE_FIELDS_19(X) \
+    X(enabled)
+REFLECT_FIELDS(NestedFlag, SERDE_FIELDS_19)
+#undef SERDE_FIELDS_19
 
 struct InlineTable {
     std::string name;
@@ -31,7 +34,12 @@ struct InlineTable {
     bool operator==(const InlineTable& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(InlineTable, name, count, nested)
+#define SERDE_FIELDS_20(X) \
+    X(name) \
+    X(count) \
+    X(nested)
+REFLECT_FIELDS(InlineTable, SERDE_FIELDS_20)
+#undef SERDE_FIELDS_20
 
 struct DottedParent {
     std::string child;
@@ -44,7 +52,10 @@ struct DottedParent {
     bool operator==(const DottedParent& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(DottedParent, child)
+#define SERDE_FIELDS_21(X) \
+    X(child)
+REFLECT_FIELDS(DottedParent, SERDE_FIELDS_21)
+#undef SERDE_FIELDS_21
 
 struct Dotted {
     DottedParent parent;
@@ -57,7 +68,10 @@ struct Dotted {
     bool operator==(const Dotted& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(Dotted, parent)
+#define SERDE_FIELDS_22(X) \
+    X(parent)
+REFLECT_FIELDS(Dotted, SERDE_FIELDS_22)
+#undef SERDE_FIELDS_22
 
 struct NestedTable {
     bool enabled{};
@@ -71,7 +85,11 @@ struct NestedTable {
     bool operator==(const NestedTable& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(NestedTable, enabled, labels)
+#define SERDE_FIELDS_23(X) \
+    X(enabled) \
+    X(labels)
+REFLECT_FIELDS(NestedTable, SERDE_FIELDS_23)
+#undef SERDE_FIELDS_23
 
 struct RegularTable {
     std::string name;
@@ -85,7 +103,11 @@ struct RegularTable {
     bool operator==(const RegularTable& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(RegularTable, name, nested)
+#define SERDE_FIELDS_24(X) \
+    X(name) \
+    X(nested)
+REFLECT_FIELDS(RegularTable, SERDE_FIELDS_24)
+#undef SERDE_FIELDS_24
 
 struct Dimensions {
     int width{};
@@ -99,7 +121,11 @@ struct Dimensions {
     bool operator==(const Dimensions& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(Dimensions, width, height)
+#define SERDE_FIELDS_25(X) \
+    X(width) \
+    X(height)
+REFLECT_FIELDS(Dimensions, SERDE_FIELDS_25)
+#undef SERDE_FIELDS_25
 
 struct Product {
     std::string name;
@@ -114,7 +140,12 @@ struct Product {
     bool operator==(const Product& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(Product, name, sku, dimensions)
+#define SERDE_FIELDS_26(X) \
+    X(name) \
+    X(sku) \
+    X(dimensions)
+REFLECT_FIELDS(Product, SERDE_FIELDS_26)
+#undef SERDE_FIELDS_26
 
 struct SyntaxDocument {
     std::string title;
@@ -185,7 +216,7 @@ struct SyntaxDocument {
     X(table, "table")                              \
     X(products, "products")
 
-TOML_REFLECT_NAMED(SyntaxDocument, SYNTAX_DOCUMENT_FIELDS)
+REFLECT_FIELDS(SyntaxDocument, SYNTAX_DOCUMENT_FIELDS)
 
 #undef SYNTAX_DOCUMENT_FIELDS
 

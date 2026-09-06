@@ -1,7 +1,7 @@
 import std;
 import toml;
 
-#include "../src/toml/toml_reflect.hpp"
+#include "../src/reflect/reflect_macros.hpp"
 
 namespace {
 
@@ -22,7 +22,11 @@ struct Credentials {
     bool operator==(const Credentials& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(Credentials, user, token)
+#define SERDE_FIELDS_16(X) \
+    X(user) \
+    X(token)
+REFLECT_FIELDS(Credentials, SERDE_FIELDS_16)
+#undef SERDE_FIELDS_16
 
 struct Endpoint {
     std::string host;
@@ -37,7 +41,12 @@ struct Endpoint {
     bool operator==(const Endpoint& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(Endpoint, host, port, credentials)
+#define SERDE_FIELDS_17(X) \
+    X(host) \
+    X(port) \
+    X(credentials)
+REFLECT_FIELDS(Endpoint, SERDE_FIELDS_17)
+#undef SERDE_FIELDS_17
 
 struct Plugin {
     std::string name;
@@ -52,7 +61,12 @@ struct Plugin {
     bool operator==(const Plugin& other) const = default;
 };
 
-TOML_REFLECT_MEMBERS(Plugin, name, enabled, ports)
+#define SERDE_FIELDS_18(X) \
+    X(name) \
+    X(enabled) \
+    X(ports)
+REFLECT_FIELDS(Plugin, SERDE_FIELDS_18)
+#undef SERDE_FIELDS_18
 
 struct Settings {
     std::string application;
@@ -102,7 +116,7 @@ struct Settings {
     X(endpoint)                  \
     X(plugins)
 
-TOML_REFLECT(Settings, SETTINGS_FIELDS)
+REFLECT_FIELDS(Settings, SETTINGS_FIELDS)
 
 #undef SETTINGS_FIELDS
 
