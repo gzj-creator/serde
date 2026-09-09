@@ -14,3 +14,27 @@ default-profile = "debug"
 [targets.app]
 kind = "bin"
 main = "src/main.cpp"
+
+[targets.benchmark_serde_json]
+kind = "bin"
+main = "benchmark/serde_json.cpp"
+
+[targets.benchmark_serde_json_alloc]
+kind = "bin"
+main = "benchmark/serde_json_alloc.cpp"
+
+[targets.benchmark_simdjson]
+kind = "bin"
+main = "benchmark/simdjson.cpp"
+
+[targets.benchmark_serde_toml]
+kind = "bin"
+main = "benchmark/serde_toml.cpp"
+
+[targets.benchmark_serde_toml_alloc]
+kind = "bin"
+main = "benchmark/serde_toml_alloc.cpp"
+
+[targets.benchmark_tomlplusplus]
+kind = "bin"
+main = "benchmark/tomlplusplus.cpp"

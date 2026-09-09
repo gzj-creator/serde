@@ -1,3 +1,8 @@
+module;
+#if defined(__SSE2__)
+#  include <emmintrin.h>
+#endif
+
 export module toml;
 
 export import std;
@@ -12,19 +17,19 @@ export namespace toml {
 template <class T>
 using result = std::expected<T, std::string>;
 
-enum class unknown_field_policy { ignore, reject };
+enum class UnknownFieldPolicy { ignore, reject };
 
-struct parse_options {
+struct ParseOptions {
     std::size_t max_input_bytes = 64ULL * 1024ULL * 1024ULL;
     std::size_t max_nodes = 1000000;
     std::size_t max_depth = 128;
     std::size_t max_string_bytes = 16ULL * 1024ULL * 1024ULL;
     std::size_t max_key_bytes = 1ULL * 1024ULL * 1024ULL;
     std::size_t max_array_items = 1000000;
-    unknown_field_policy unknown_fields = unknown_field_policy::ignore;
+    UnknownFieldPolicy unknown_fields = UnknownFieldPolicy::ignore;
 };
 
-struct serialize_options {
+struct SerializeOptions {
     std::size_t max_output_bytes = 64ULL * 1024ULL * 1024ULL;
 };
 
@@ -99,7 +104,7 @@ struct offset_date_time {
  * @tparam T 被包装的反射结构类型。
  */
 template <class T>
-struct inline_table {
+struct InlineTable {
     T value;
 
     /**
@@ -107,8 +112,11 @@ struct inline_table {
      * @param other 待比较的内联表。
      * @return 包装值相同时返回 `true`。
      */
-    bool operator==(const inline_table& other) const = default;
+    bool operator==(const InlineTable& other) const = default;
 };
+
+template <class T>
+using inline_table = InlineTable<T>;
 
 /**
  * @brief 保存反射字段名称及其成员指针的描述符。
@@ -127,7 +135,11 @@ using reflect::make_field;
  * @tparam T 待检测的类型。
  */
 template <class T>
-concept reflectable = reflect::reflectable<T>;
+concept Reflectable = reflect::Reflectable<T>;
+
+using parse_options = ParseOptions;
+using serialize_options = SerializeOptions;
+using unknown_field_policy = UnknownFieldPolicy;
 
 /**
  * @brief 遍历对象的全部反射字段。
@@ -137,7 +149,7 @@ concept reflectable = reflect::reflectable<T>;
  * @param function 每个字段调用一次的回调函数。
  */
 template <class T, class Function>
-    requires reflectable<T>
+    requires Reflectable<T>
 constexpr void for_each_field(T& value, Function&& function) {
     reflect::for_each_field(value, std::forward<Function>(function));
 }
@@ -145,74 +157,77 @@ constexpr void for_each_field(T& value, Function&& function) {
 namespace detail {
 
 template <class T>
-using bare_t = std::remove_cvref_t<T>;
+using BareT = std::remove_cvref_t<T>;
 
 template <class T>
-struct optional_traits {
+using bare_t = BareT<T>;
+
+template <class T>
+struct OptionalTraits {
     static constexpr bool value = false;
 };
 
 template <class T>
-struct optional_traits<std::optional<T>> {
+struct OptionalTraits<std::optional<T>> {
     static constexpr bool value = true;
     using value_type = T;
 };
 
 template <class T>
-struct vector_traits {
+struct VectorTraits {
     static constexpr bool value = false;
 };
 
 template <class T, class Allocator>
-struct vector_traits<std::vector<T, Allocator>> {
+struct VectorTraits<std::vector<T, Allocator>> {
     static constexpr bool value = true;
     using value_type = T;
 };
 
 template <class T>
-struct array_traits {
+struct ArrayTraits {
     static constexpr bool value = false;
 };
 
 template <class T>
-struct inline_table_traits {
+struct InlineTableTraits {
     static constexpr bool value = false;
 };
 
 template <class T>
-struct inline_table_traits<inline_table<T>> {
+struct InlineTableTraits<InlineTable<T>> {
     static constexpr bool value = true;
     using value_type = T;
 };
 
 template <class T, std::size_t Size>
-struct array_traits<std::array<T, Size>> {
+struct ArrayTraits<std::array<T, Size>> {
     static constexpr bool value = true;
     using value_type = T;
     static constexpr std::size_t size = Size;
 };
 
 template <class T>
-struct map_traits {
+struct MapTraits {
     static constexpr bool value = false;
 };
 
 template <class Value, class Compare, class Allocator>
-struct map_traits<std::map<std::string, Value, Compare, Allocator>> {
+struct MapTraits<std::map<std::string, Value, Compare, Allocator>> {
     static constexpr bool value = true;
     using mapped_type = Value;
 };
 
 template <class Value, class Hash, class Equal, class Allocator>
-struct map_traits<std::unordered_map<std::string, Value, Hash, Equal,
+struct MapTraits<std::unordered_map<std::string, Value, Hash, Equal,
                                       Allocator>> {
     static constexpr bool value = true;
     using mapped_type = Value;
 };
 
-struct node {
-    using array = std::vector<node>;
-    using table = std::map<std::string, node>;
+struct Node {
+    using array = std::vector<Node>;
+    using table = std::map<std::string, Node>;
     using storage = std::variant<std::monostate, bool, std::int64_t, double,
                                  std::string, date, time, local_date_time,
                                  offset_date_time, array, table>;
@@ -221,42 +236,42 @@ struct node {
     bool inline_table = false;
     bool array_table = false;
 
-    enum class table_definition {
+    enum class TableDefinition {
         implicit,
         dotted_key,
         explicit_table,
         array_element,
         inline_table,
-    } definition = table_definition::implicit;
+    } definition = TableDefinition::implicit;
 
     /** @brief 构造一个空节点。 */
-    node() = default;
+    Node() = default;
 
     /**
      * @brief 复制构造节点。
      * @param other 待复制的节点。
      */
-    node(const node& other) = default;
+    Node(const Node& other) = default;
 
     /**
      * @brief 移动构造节点。
      * @param other 待移动的节点。
      */
-    node(node&& other) noexcept = default;
+    Node(Node&& other) noexcept = default;
 
     /**
      * @brief 复制赋值节点。
      * @param other 待复制的节点。
      * @return 当前节点的引用。
      */
-    node& operator=(const node& other) = default;
+    Node& operator=(const Node& other) = default;
 
     /**
      * @brief 移动赋值节点。
      * @param other 待移动的节点。
      * @return 当前节点的引用。
      */
-    node& operator=(node&& other) noexcept = default;
+    Node& operator=(Node&& other) noexcept = default;
 
     /**
      * @brief 使用任意受支持的值构造节点。
@@ -264,13 +279,25 @@ struct node {
      * @param input 要保存的值。
      */
     template <class T>
-        requires(!std::same_as<bare_t<T>, node>)
-    node(T&& input) : value(std::forward<T>(input)) {}
+        requires(!std::same_as<bare_t<T>, Node>)
+    Node(T&& input) : value(std::forward<T>(input)) {}
 };
 
-/** @brief Check that a byte string is well-formed UTF-8. */
+using node = Node;
+
+/** @brief 检查字节字符串是否为合法的 UTF-8。 */
 inline bool valid_utf8(std::string_view text) {
     for (std::size_t index = 0; index < text.size();) {
+#if defined(__SSE2__)
+        while (index + 16 <= text.size()) {
+            const auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(text.data() + index));
+            if (_mm_movemask_epi8(chunk) != 0) break;
+            index += 16;
+        }
+        if (index == text.size()) {
+            break;
+        }
+#endif
         const auto byte = static_cast<unsigned char>(text[index]);
         if (byte <= 0x7f) {
             ++index;
@@ -313,18 +340,97 @@ inline bool valid_utf8(std::string_view text) {
     return true;
 }
 
-/** @brief Check UTF-8 plus the control characters representable by TOML strings. */
-inline void mark_inline_table(node& value) {
+inline std::size_t skip_toml_space(std::string_view text, std::size_t position,
+                                    bool allow_newlines) noexcept {
+#if defined(__SSE2__)
+    const auto* data = text.data();
+    const auto space = _mm_set1_epi8(0x20);
+    const auto tab = _mm_set1_epi8(0x09);
+    const auto newline = _mm_set1_epi8(0x0a);
+    const auto carriage = _mm_set1_epi8(0x0d);
+    while (position + 16 <= text.size()) {
+        const auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + position));
+        auto matches = _mm_or_si128(_mm_cmpeq_epi8(chunk, space), _mm_cmpeq_epi8(chunk, tab));
+        if (allow_newlines) {
+            matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, newline));
+            matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, carriage));
+        }
+        const auto mask = static_cast<unsigned>(_mm_movemask_epi8(matches));
+        if (mask == 0xffffU) {
+            position += 16;
+            continue;
+        }
+        position += static_cast<std::size_t>(std::countr_zero(mask ^ 0xffffU));
+        return position;
+    }
+#endif
+    while (position < text.size() &&
+           (text[position] == 0x20 || text[position] == 0x09 ||
+            (allow_newlines && (text[position] == 0x0a || text[position] == 0x0d)))) {
+        ++position;
+    }
+    return position;
+}
+
+inline std::size_t find_toml_string_special(std::string_view text,
+                                             std::size_t position, char quote,
+                                             bool include_escape) noexcept {
+#if defined(__SSE2__)
+    const auto* data = text.data();
+    const auto delimiter = _mm_set1_epi8(quote);
+    const auto slash = _mm_set1_epi8(0x5c);
+    const auto newline = _mm_set1_epi8(0x0a);
+    const auto carriage = _mm_set1_epi8(0x0d);
+    const auto deleted = _mm_set1_epi8(0x7f);
+    const auto zero = _mm_setzero_si128();
+    const auto high_bit = _mm_set1_epi8(static_cast<char>(0x80));
+    const auto control_limit = _mm_set1_epi8(0x20);
+    const auto tab = _mm_set1_epi8(0x09);
+    while (position + 16 <= text.size()) {
+        const auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + position));
+        auto matches = _mm_cmpeq_epi8(chunk, delimiter);
+        if (include_escape) matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, slash));
+        matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, newline));
+        matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, carriage));
+        matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, deleted));
+        const auto ascii = _mm_cmpeq_epi8(_mm_and_si128(chunk, high_bit), zero);
+        auto controls = _mm_and_si128(ascii, _mm_cmpgt_epi8(control_limit, chunk));
+        controls = _mm_andnot_si128(_mm_cmpeq_epi8(chunk, tab), controls);
+        matches = _mm_or_si128(matches, controls);
+        const auto mask = static_cast<unsigned>(_mm_movemask_epi8(matches));
+        if (mask == 0) {
+            position += 16;
+            continue;
+        }
+        position += static_cast<std::size_t>(std::countr_zero(mask));
+        return position;
+    }
+#endif
+    while (position < text.size()) {
+        const auto character = static_cast<unsigned char>(text[position]);
+        if (character == static_cast<unsigned char>(quote) ||
+            (include_escape && character == 0x5c) || character == 0x0a ||
+            character == 0x0d || character == 0x7f ||
+            (character < 0x20 && character != 0x09)) {
+            return position;
+        }
+        ++position;
+    }
+    return position;
+}
+
+/** @brief 标记所有可通过 TOML 字符串表示的控制字符的后代。 */
+inline void markInlineTable(Node& value) {
     value.inline_table = true;
-    value.definition = node::table_definition::inline_table;
-    if (auto* table = std::get_if<node::table>(&value.value)) {
+    value.definition = Node::TableDefinition::inline_table;
+    if (auto* table = std::get_if<Node::table>(&value.value)) {
         for (auto& [key, child] : *table) {
             static_cast<void>(key);
-            mark_inline_table(child);
+            markInlineTable(child);
         }
-    } else if (auto* array = std::get_if<node::array>(&value.value)) {
+    } else if (auto* array = std::get_if<Node::array>(&value.value)) {
         for (auto& child : *array) {
-            mark_inline_table(child);
+            markInlineTable(child);
         }
     }
 }
@@ -344,11 +450,6 @@ inline std::string_view trim(std::string_view text) {
     return text;
 }
 
-inline bool toml_whitespace(char character) {
-    return character == ' ' || character == '\t' || character == '\n' ||
-           character == '\r';
-}
-
 /**
  * @brief 移除不在字符串字面量中的 TOML 行注释。
  * @param line 待处理的单行文本。
@@ -363,7 +464,7 @@ inline result<void> append_utf8(std::string& output, std::uint32_t code_point);
  * @param raw_key 原始键文本。
  * @return 解析后的键名，或包含原因的错误结果。
  */
-inline result<std::string> parse_key(std::string_view raw_key) {
+inline result<std::string> parseKey(std::string_view raw_key) {
     const auto key = trim(raw_key);
     if (key.empty()) {
         return std::unexpected(std::string("empty TOML key"));
@@ -472,7 +573,7 @@ inline result<std::string> parse_key(std::string_view raw_key) {
  * @param raw 原始键路径文本。
  * @return 按层级拆分后的键名列表，或包含原因的错误结果。
  */
-inline result<std::vector<std::string>> parse_key_path(std::string_view raw,
+inline result<std::vector<std::string>> parseKeyPath(std::string_view raw,
                                                         std::size_t max_key_bytes = std::numeric_limits<std::size_t>::max(),
                                                         std::size_t max_components = std::numeric_limits<std::size_t>::max()) {
     if (raw.size() > max_key_bytes) {
@@ -508,7 +609,7 @@ inline result<std::vector<std::string>> parse_key_path(std::string_view raw,
         }
 
         if ((character == '.' && !double_quoted && !single_quoted) || at_end) {
-            auto part = parse_key(raw.substr(start, index - start));
+            auto part = parseKey(raw.substr(start, index - start));
             if (!part) {
                 return std::unexpected(part.error());
             }
@@ -546,11 +647,10 @@ inline bool number_digit(char value, int base) {
 }
 
 /**
- * @brief Validate TOML number grammar and remove legal digit separators.
+ * @brief 验证 TOML 数字语法并移除合法的数字分隔符。
  *
- * `from_chars` deliberately accepts a wider grammar than TOML (for example
- * leading zeroes and a missing digit after a decimal point), so the lexical
- * checks live here instead of relying on the library conversion routine.
+ * `from_chars` 有意接受比 TOML 更宽的语法（例如前导零和小数点后缺少数字），
+ * 因此词法检查放在这里，而不是依赖库转换例程。
  */
 inline result<std::string> normalize_number_lexeme(std::string_view text,
                                                    bool& floating, int& base) {
@@ -830,7 +930,7 @@ inline result<std::pair<time, std::size_t>> parse_time_prefix(std::string_view t
  * @param text 待解析的时间语法文本。
  * @return 对应的内部节点，或时间格式错误。
  */
-inline result<node> parse_temporal_value(std::string_view text) {
+inline result<Node> parse_temporal_value(std::string_view text) {
     const bool date_like = text.size() >= 10 && ascii_digit(text[0]) &&
                            ascii_digit(text[1]) && ascii_digit(text[2]) &&
                            ascii_digit(text[3]) && text[4] == '-' && text[7] == '-';
@@ -840,7 +940,7 @@ inline result<node> parse_temporal_value(std::string_view text) {
             return std::unexpected(parsed_date.error());
         }
         if (text.size() == 10) {
-            return node{std::move(*parsed_date)};
+            return Node{std::move(*parsed_date)};
         }
         if (text[10] != 'T' && text[10] != 't' && text[10] != ' ') {
             return std::unexpected(std::string("invalid TOML date-time separator"));
@@ -853,10 +953,10 @@ inline result<node> parse_temporal_value(std::string_view text) {
                                     std::move(parsed_time->first)};
         const auto offset = 11 + parsed_time->second;
         if (offset == text.size()) {
-            return node{local};
+            return Node{local};
         }
         if (text.substr(offset) == "Z" || text.substr(offset) == "z") {
-            return node{offset_date_time{local, 0}};
+            return Node{offset_date_time{local, 0}};
         }
         if (text.size() != offset + 6 ||
             (text[offset] != '+' && text[offset] != '-') || text[offset + 3] != ':') {
@@ -873,7 +973,7 @@ inline result<node> parse_temporal_value(std::string_view text) {
         if (text[offset] == '-') {
             offset_minutes = -offset_minutes;
         }
-        return node{offset_date_time{local, offset_minutes}};
+        return Node{offset_date_time{local, offset_minutes}};
     }
 
     const bool time_like = text.size() >= 8 && ascii_digit(text[0]) &&
@@ -885,7 +985,7 @@ inline result<node> parse_temporal_value(std::string_view text) {
                                        ? std::string("invalid TOML time")
                                        : parsed_time.error());
         }
-        return node{std::move(parsed_time->first)};
+        return Node{std::move(parsed_time->first)};
     }
     return std::unexpected(std::string("not a TOML temporal value"));
 }
@@ -897,23 +997,23 @@ inline result<node> parse_temporal_value(std::string_view text) {
  * @param value 要插入的节点值。
  * @return 插入成功时返回 `true`；路径冲突、为空或键重复时返回 `false`。
  */
-inline bool insert_value_at(node::table& root,
+inline bool insertValueAt(Node::table& root,
                             const std::vector<std::string>& path,
-                            node value) {
+                            Node value) {
     if (path.empty()) {
         return false;
     }
-    node::table* table = &root;
+    Node::table* table = &root;
     for (std::size_t index = 0; index + 1 < path.size(); ++index) {
-        auto [iterator, inserted] = table->try_emplace(path[index], node{node::table{}});
+        auto [iterator, inserted] = table->try_emplace(path[index], Node{Node::table{}});
         if (!inserted && (iterator->second.inline_table ||
-                          !std::holds_alternative<node::table>(iterator->second.value))) {
+                          !std::holds_alternative<Node::table>(iterator->second.value))) {
             return false;
         }
         if (inserted) {
-            iterator->second.definition = node::table_definition::dotted_key;
+            iterator->second.definition = Node::TableDefinition::dotted_key;
         }
-        table = &std::get<node::table>(iterator->second.value);
+        table = &std::get<Node::table>(iterator->second.value);
     }
     return table->emplace(path.back(), std::move(value)).second;
 }
@@ -923,29 +1023,31 @@ inline bool insert_value_at(node::table& root,
  *
  * 解析器维护输入视图和当前偏移量，供文档解析器在赋值语句中复用。
  */
-struct parse_context {
-    const parse_options& options;
+struct ParseContext {
+    const ParseOptions& options;
     std::size_t depth = 0;
     std::size_t nodes = 0;
 };
 
-class value_parser {
+using parse_context = ParseContext;
+
+class ValueParser {
 public:
     /**
      * @brief 构造值解析器。
      * @param text 待解析的完整文本。
      * @param position 初始读取位置，默认为文本开头。
      */
-    explicit value_parser(std::string_view text, std::size_t position,
-                          bool allow_newlines, parse_context& context)
+    explicit ValueParser(std::string_view text, std::size_t position,
+                          bool allow_newlines, ParseContext& context)
         : text_(text), position_(position), allow_newlines_(allow_newlines), context_(context) {}
 
     /**
      * @brief 解析一个值并确保后面没有多余文本。
      * @return 解析出的节点，或语法错误。
      */
-    result<node> parse() {
-        auto parsed = parse_value();
+    result<Node> parse() {
+        auto parsed = parseValue();
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
@@ -960,8 +1062,8 @@ public:
      * @brief 从当前位置解析一个值。
      * @return 解析出的节点；解析结束位置可通过 `position()` 获取。
      */
-    result<node> parse_one() {
-        return parse_value();
+    result<Node> parse_one() {
+        return parseValue();
     }
 
     /**
@@ -975,19 +1077,12 @@ public:
 private:
     /** @brief 跳过所有空白字符。 */
     void skip_space() {
-        while (position_ < text_.size() &&
-               (allow_newlines_ ? toml_whitespace(text_[position_])
-                                : text_[position_] == ' ' || text_[position_] == '\t')) {
-            ++position_;
-        }
+        position_ = skip_toml_space(text_, position_, allow_newlines_);
     }
 
     /** @brief 跳过内联表允许的空格和制表符。 */
     void skip_inline_space() {
-        while (position_ < text_.size() &&
-               (text_[position_] == ' ' || text_[position_] == '\t')) {
-            ++position_;
-        }
+        position_ = skip_toml_space(text_, position_, false);
     }
 
     /** @brief 跳过空白和以 `#` 开头的注释。 */
@@ -1077,7 +1172,7 @@ private:
      * @brief 根据首字符分派并解析一个 TOML 值。
      * @return 解析出的节点，或语法错误。
      */
-    result<node> parse_value() {
+    result<Node> parseValue() {
         skip_space();
         if (position_ >= text_.size()) {
             return std::unexpected(std::string("missing TOML value"));
@@ -1086,11 +1181,11 @@ private:
             return std::unexpected(std::string("TOML nesting depth exceeds configured limit"));
         }
         ++context_.depth;
-        struct depth_guard {
+        struct DepthGuard {
             std::size_t& depth;
-            ~depth_guard() { --depth; }
+            ~DepthGuard() { --depth; }
         } guard{context_.depth};
-        auto parsed = parse_value_impl();
+        auto parsed = parseValueImpl();
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
@@ -1105,7 +1200,7 @@ private:
         return parsed;
     }
 
-    result<node> parse_value_impl() {
+    result<Node> parseValueImpl() {
         skip_space();
         if (position_ >= text_.size()) {
             return std::unexpected(std::string("missing TOML value"));
@@ -1113,34 +1208,62 @@ private:
 
         switch (text_[position_]) {
             case '"':
-                return starts_with("\"\"\"") ? parse_multiline_basic_string()
-                                                   : parse_basic_string();
+                return starts_with("\"\"\"") ? parseMultilineBasicString()
+                                                   : parseBasicString();
             case '\'':
-                return starts_with("'''") ? parse_multiline_literal_string()
-                                             : parse_literal_string();
+                return starts_with("'''") ? parseMultilineLiteralString()
+                                             : parseLiteralString();
             case '[':
-                return parse_array();
+                return parseArray();
             case '{':
-                return parse_inline_table();
+                return parseInlineTable();
             default:
-                return parse_atom();
+                return parseAtom();
         }
+    }
+
+    result<void> append_string_chunk(std::string& value, std::string_view chunk) {
+        const auto limit = context_.options.max_string_bytes;
+        if (value.size() > limit || chunk.size() > limit - value.size()) {
+            return std::unexpected(std::string("TOML string exceeds configured size limit"));
+        }
+        if (value.empty() && !chunk.empty()) {
+            value.reserve(chunk.size());
+        }
+        value.append(chunk);
+        return {};
+    }
+
+    result<void> check_string_size(const std::string& value) const {
+        if (value.size() > context_.options.max_string_bytes) {
+            return std::unexpected(std::string("TOML string exceeds configured size limit"));
+        }
+        return {};
     }
 
     /**
      * @brief 解析单行基本字符串。
      * @return 字符串节点，或字符串语法错误。
      */
-    result<node> parse_basic_string() {
+    result<Node> parseBasicString() {
         ++position_;
         std::string value;
         while (position_ < text_.size()) {
+            const auto special = find_toml_string_special(text_, position_, '"', true);
+            if (special > position_) {
+                auto appended = append_string_chunk(
+                    value, text_.substr(position_, special - position_));
+                if (!appended) {
+                    return std::unexpected(appended.error());
+                }
+                position_ = special;
+            }
+            if (position_ >= text_.size()) {
+                break;
+            }
             const char character = text_[position_++];
             if (character == '"') {
-                if (!valid_utf8(value)) {
-                    return std::unexpected(std::string("invalid UTF-8 in TOML string"));
-                }
-                return node{std::move(value)};
+                return Node{std::move(value)};
             }
             if (character == '\\') {
                 auto escaped = append_basic_escape(value);
@@ -1156,6 +1279,10 @@ private:
             } else {
                 value.push_back(character);
             }
+            auto checked = check_string_size(value);
+            if (!checked) {
+                return std::unexpected(checked.error());
+            }
         }
         return std::unexpected(std::string("unterminated basic TOML string"));
     }
@@ -1164,16 +1291,25 @@ private:
      * @brief 解析单行字面字符串。
      * @return 字符串节点，或字符串语法错误。
      */
-    result<node> parse_literal_string() {
+    result<Node> parseLiteralString() {
         ++position_;
         std::string value;
         while (position_ < text_.size()) {
+            const auto special = find_toml_string_special(text_, position_, '\'', false);
+            if (special > position_) {
+                auto appended = append_string_chunk(
+                    value, text_.substr(position_, special - position_));
+                if (!appended) {
+                    return std::unexpected(appended.error());
+                }
+                position_ = special;
+            }
+            if (position_ >= text_.size()) {
+                break;
+            }
             const char character = text_[position_++];
             if (character == '\'') {
-                if (!valid_utf8(value)) {
-                    return std::unexpected(std::string("invalid UTF-8 in TOML string"));
-                }
-                return node{std::move(value)};
+                return Node{std::move(value)};
             }
             if (character == '\n' || character == '\r') {
                 return std::unexpected(std::string("newline in literal TOML string"));
@@ -1185,6 +1321,10 @@ private:
                 return std::unexpected(std::string("control character in literal TOML string"));
             }
             value.push_back(character);
+            auto checked = check_string_size(value);
+            if (!checked) {
+                return std::unexpected(checked.error());
+            }
         }
         return std::unexpected(std::string("unterminated literal TOML string"));
     }
@@ -1193,7 +1333,7 @@ private:
      * @brief 解析三引号包围的多行基本字符串。
      * @return 字符串节点，或字符串语法错误。
      */
-    result<node> parse_multiline_basic_string() {
+    result<Node> parseMultilineBasicString() {
         position_ += 3;
         if (position_ < text_.size() &&
             (text_[position_] == '\n' || text_[position_] == '\r')) {
@@ -1202,6 +1342,18 @@ private:
 
         std::string value;
         while (position_ < text_.size()) {
+            const auto special = find_toml_string_special(text_, position_, '"', true);
+            if (special > position_) {
+                auto appended = append_string_chunk(
+                    value, text_.substr(position_, special - position_));
+                if (!appended) {
+                    return std::unexpected(appended.error());
+                }
+                position_ = special;
+            }
+            if (position_ >= text_.size()) {
+                break;
+            }
             if (starts_with("\"\"\"")) {
                 std::size_t run = 0;
                 while (position_ + run < text_.size() && text_[position_ + run] == '"') {
@@ -1209,13 +1361,14 @@ private:
                 }
                 if (run == 3) {
                     position_ += 3;
-                    if (!valid_utf8(value)) {
-                        return std::unexpected(std::string("invalid UTF-8 in TOML string"));
-                    }
-                    return node{std::move(value)};
+                    return Node{std::move(value)};
                 }
                 if (run == 4 || run == 5) {
                     value.append(run - 3, '"');
+                    auto checked = check_string_size(value);
+                    if (!checked) {
+                        return std::unexpected(checked.error());
+                    }
                     position_ += run;
                     continue;
                 }
@@ -1227,9 +1380,7 @@ private:
                 if (position_ < text_.size() &&
                     (text_[position_] == '\n' || text_[position_] == '\r')) {
                     consume_line_break();
-                    while (position_ < text_.size() && toml_whitespace(text_[position_])) {
-                        ++position_;
-                    }
+                    position_ = skip_toml_space(text_, position_, true);
                     continue;
                 }
                 auto escaped = append_basic_escape(value);
@@ -1249,6 +1400,10 @@ private:
             } else {
                 value.push_back(character);
             }
+            auto checked = check_string_size(value);
+            if (!checked) {
+                return std::unexpected(checked.error());
+            }
         }
         return std::unexpected(std::string("unterminated multiline basic TOML string"));
     }
@@ -1257,7 +1412,7 @@ private:
      * @brief 解析三单引号包围的多行字面字符串。
      * @return 字符串节点，或字符串语法错误。
      */
-    result<node> parse_multiline_literal_string() {
+    result<Node> parseMultilineLiteralString() {
         position_ += 3;
         if (position_ < text_.size() &&
             (text_[position_] == '\n' || text_[position_] == '\r')) {
@@ -1266,6 +1421,18 @@ private:
 
         std::string value;
         while (position_ < text_.size()) {
+            const auto special = find_toml_string_special(text_, position_, '\'', false);
+            if (special > position_) {
+                auto appended = append_string_chunk(
+                    value, text_.substr(position_, special - position_));
+                if (!appended) {
+                    return std::unexpected(appended.error());
+                }
+                position_ = special;
+            }
+            if (position_ >= text_.size()) {
+                break;
+            }
             if (starts_with("'''")) {
                 std::size_t run = 0;
                 while (position_ + run < text_.size() && text_[position_ + run] == '\'') {
@@ -1273,13 +1440,14 @@ private:
                 }
                 if (run == 3) {
                     position_ += 3;
-                    if (!valid_utf8(value)) {
-                        return std::unexpected(std::string("invalid UTF-8 in TOML string"));
-                    }
-                    return node{std::move(value)};
+                    return Node{std::move(value)};
                 }
                 if (run == 4 || run == 5) {
                     value.append(run - 3, '\'');
+                    auto checked = check_string_size(value);
+                    if (!checked) {
+                        return std::unexpected(checked.error());
+                    }
                     position_ += run;
                     continue;
                 }
@@ -1302,6 +1470,10 @@ private:
             } else {
                 value.push_back(text_[position_++]);
             }
+            auto checked = check_string_size(value);
+            if (!checked) {
+                return std::unexpected(checked.error());
+            }
         }
         return std::unexpected(std::string("unterminated multiline literal TOML string"));
     }
@@ -1310,23 +1482,23 @@ private:
      * @brief 解析 TOML 数组及其元素。
      * @return 数组节点，或数组语法错误。
      */
-    result<node> parse_array() {
+    result<Node> parseArray() {
         ++position_;
-        struct newline_guard {
+        struct NewlineGuard {
             bool& target;
             bool previous;
-            ~newline_guard() { target = previous; }
+            ~NewlineGuard() { target = previous; }
         } guard{allow_newlines_, allow_newlines_};
         allow_newlines_ = true;
-        node::array values;
+        Node::array values;
         skip_trivia();
         if (position_ < text_.size() && text_[position_] == ']') {
             ++position_;
-            return node{std::move(values)};
+            return Node{std::move(values)};
         }
 
         while (position_ < text_.size()) {
-            auto value = parse_value();
+            auto value = parseValue();
             if (!value) {
                 return std::unexpected(value.error());
             }
@@ -1340,7 +1512,7 @@ private:
             }
             if (text_[position_] == ']') {
                 ++position_;
-                return node{std::move(values)};
+                return Node{std::move(values)};
             }
             if (text_[position_] != ',') {
                 return std::unexpected(std::string("expected ',' or ']' in TOML array"));
@@ -1349,7 +1521,7 @@ private:
             skip_trivia();
             if (position_ < text_.size() && text_[position_] == ']') {
                 ++position_;
-                return node{std::move(values)};
+                return Node{std::move(values)};
             }
         }
 
@@ -1360,14 +1532,14 @@ private:
      * @brief 解析 TOML 内联表。
      * @return 内联表节点，或键值语法错误。
      */
-    result<node> parse_inline_table() {
+    result<Node> parseInlineTable() {
         ++position_;
-        node::table values;
+        Node::table values;
         skip_inline_space();
         if (position_ < text_.size() && text_[position_] == '}') {
             ++position_;
-            node result{std::move(values)};
-            mark_inline_table(result);
+            Node result{std::move(values)};
+            markInlineTable(result);
             return result;
         }
 
@@ -1405,7 +1577,7 @@ private:
             if (position_ >= text_.size() || text_[position_] != '=') {
                 return std::unexpected(std::string("expected '=' in inline TOML table"));
             }
-            auto path = parse_key_path(text_.substr(key_start, position_ - key_start), context_.options.max_key_bytes, context_.options.max_depth);
+            auto path = parseKeyPath(text_.substr(key_start, position_ - key_start), context_.options.max_key_bytes, context_.options.max_depth);
             if (!path || path->empty()) {
                 return std::unexpected(path ? std::string("empty inline TOML key")
                                              : path.error());
@@ -1413,12 +1585,12 @@ private:
             ++position_;
             const bool previous_allow_newlines = allow_newlines_;
             allow_newlines_ = false;
-            auto value = parse_value();
+            auto value = parseValue();
             allow_newlines_ = previous_allow_newlines;
             if (!value) {
                 return std::unexpected(value.error());
             }
-            if (!insert_value_at(values, *path, std::move(*value))) {
+            if (!insertValueAt(values, *path, std::move(*value))) {
                 return std::unexpected(std::string("duplicate key in inline TOML table"));
             }
             skip_inline_space();
@@ -1427,8 +1599,8 @@ private:
             }
             if (text_[position_] == '}') {
                 ++position_;
-                node result{std::move(values)};
-                mark_inline_table(result);
+                Node result{std::move(values)};
+                markInlineTable(result);
                 return result;
             }
             if (text_[position_] != ',') {
@@ -1448,7 +1620,7 @@ private:
      * @brief 解析布尔值、整数、浮点数和时间等非容器值。
      * @return 标量节点，或无法识别的值错误。
      */
-    result<node> parse_atom() {
+    result<Node> parseAtom() {
         const std::size_t start = position_;
         while (position_ < text_.size()) {
             const char character = text_[position_];
@@ -1460,10 +1632,10 @@ private:
         }
         const auto atom = trim(text_.substr(start, position_ - start));
         if (atom == "true") {
-            return node{true};
+            return Node{true};
         }
         if (atom == "false") {
-            return node{false};
+            return Node{false};
         }
         if (atom.empty()) {
             return std::unexpected(std::string("empty TOML atom"));
@@ -1477,13 +1649,13 @@ private:
             return parse_temporal_value(atom);
         }
         if (atom == "inf" || atom == "+inf") {
-            return node{std::numeric_limits<double>::infinity()};
+            return Node{std::numeric_limits<double>::infinity()};
         }
         if (atom == "-inf") {
-            return node{-std::numeric_limits<double>::infinity()};
+            return Node{-std::numeric_limits<double>::infinity()};
         }
         if (atom == "nan" || atom == "+nan" || atom == "-nan") {
-            return node{std::numeric_limits<double>::quiet_NaN()};
+            return Node{std::numeric_limits<double>::quiet_NaN()};
         }
         bool lexical_floating = false;
         int lexical_base = 10;
@@ -1508,7 +1680,7 @@ private:
                 return std::unexpected(std::string("invalid TOML floating-point value: ") +
                                        normalized);
             }
-            return node{value};
+            return Node{value};
         }
 
         bool negative = false;
@@ -1540,44 +1712,44 @@ private:
                 return std::unexpected(std::string("TOML integer is outside signed 64-bit range"));
             }
             if (magnitude == negative_limit) {
-                return node{std::numeric_limits<std::int64_t>::min()};
+                return Node{std::numeric_limits<std::int64_t>::min()};
             }
-            return node{-static_cast<std::int64_t>(magnitude)};
+            return Node{-static_cast<std::int64_t>(magnitude)};
         }
         if (magnitude > positive_limit) {
             return std::unexpected(std::string("TOML integer is outside signed 64-bit range"));
         }
-        return node{static_cast<std::int64_t>(magnitude)};
+        return Node{static_cast<std::int64_t>(magnitude)};
     }
 
     std::string_view text_;
     std::size_t position_ = 0;
     bool allow_newlines_ = true;
-    parse_context& context_;
+    ParseContext& context_;
 };
 
 /**
  * @brief 解析完整 TOML 文档并生成内部表树。
  */
-class document_parser {
+class DocumentParser {
 public:
     /**
      * @brief 构造文档解析器。
      * @param text 待解析的 TOML 文档文本。
      */
-    explicit document_parser(std::string_view text, const parse_options& options)
+    explicit DocumentParser(std::string_view text, const ParseOptions& options)
         : text_(text), options_(options), context_{options} {}
 
     /**
      * @brief 解析完整文档。
      * @return 文档根表，或包含位置上下文的语法错误。
      */
-    result<node::table> parse() {
+    result<Node::table> parse() {
         if (!valid_utf8(text_)) {
             return std::unexpected(std::string("invalid UTF-8 in TOML document"));
         }
-        node::table root;
-        node::table* current_table = &root;
+        Node::table root;
+        Node::table* current_table = &root;
         while (true) {
             skip_trivia();
             if (position_ == text_.size()) {
@@ -1603,9 +1775,7 @@ private:
     /** @brief 跳过文档中的空白和注释。 */
     void skip_trivia() {
         while (true) {
-            while (position_ < text_.size() && toml_whitespace(text_[position_])) {
-                ++position_;
-            }
+            position_ = skip_toml_space(text_, position_, true);
             if (position_ == text_.size() || text_[position_] != '#') {
                 return;
             }
@@ -1620,10 +1790,10 @@ private:
      * @return 行尾合法时返回成功结果，否则返回多余字符错误。
      */
     result<void> finish_line() {
-        while (position_ < text_.size() &&
-               (text_[position_] == ' ' || text_[position_] == '\t' ||
-                text_[position_] == '\r')) {
+        position_ = skip_toml_space(text_, position_, false);
+        while (position_ < text_.size() && text_[position_] == '\r') {
             ++position_;
+            position_ = skip_toml_space(text_, position_, false);
         }
         if (position_ < text_.size() && text_[position_] == '#') {
             while (position_ < text_.size() && text_[position_] != '\n') {
@@ -1719,14 +1889,14 @@ private:
      * @param root 文档根表。
      * @return 新打开表的指针，或表头语法错误。
      */
-    result<node::table*> parse_header(node::table& root) {
+    result<Node::table*> parse_header(Node::table& root) {
         const bool array_table = text_.substr(position_).starts_with("[[");
         const std::size_t content_start = position_ + (array_table ? 2 : 1);
         const std::size_t content_end = find_header_end(content_start, array_table);
         if (content_end == std::string_view::npos) {
             return std::unexpected(std::string("unterminated TOML table header"));
         }
-        auto path = parse_key_path(text_.substr(content_start, content_end - content_start), options_.max_key_bytes, options_.max_depth);
+        auto path = parseKeyPath(text_.substr(content_start, content_end - content_start), options_.max_key_bytes, options_.max_depth);
         if (!path || path->empty()) {
             return std::unexpected(path ? std::string("empty TOML table header")
                                          : path.error());
@@ -1744,26 +1914,23 @@ private:
      * @param current_table 当前活动表。
      * @return 赋值成功时返回成功结果，否则返回语法或键冲突错误。
      */
-    result<void> parse_assignment(node::table& current_table) {
+    result<void> parse_assignment(Node::table& current_table) {
         const std::size_t equals = find_assignment();
         if (equals == std::string_view::npos) {
             return std::unexpected(std::string("expected '=' in TOML assignment"));
         }
-        auto path = parse_key_path(text_.substr(position_, equals - position_), options_.max_key_bytes, options_.max_depth);
+        auto path = parseKeyPath(text_.substr(position_, equals - position_), options_.max_key_bytes, options_.max_depth);
         if (!path || path->empty()) {
             return std::unexpected(path ? std::string("empty TOML key")
                                          : path.error());
         }
         position_ = equals + 1;
-        while (position_ < text_.size() &&
-               (text_[position_] == ' ' || text_[position_] == '\t')) {
-            ++position_;
-        }
+        position_ = skip_toml_space(text_, position_, false);
         if (position_ >= text_.size() || text_[position_] == '\n' ||
             text_[position_] == '\r') {
             return std::unexpected(std::string("missing TOML value"));
         }
-        value_parser parser(text_, position_, true, context_);
+        ValueParser parser(text_, position_, true, context_);
         auto value = parser.parse_one();
         if (!value) {
             return std::unexpected(value.error());
@@ -1773,7 +1940,7 @@ private:
         if (!finished) {
             return std::unexpected(finished.error());
         }
-        if (!insert_value_at(current_table, *path, std::move(*value))) {
+        if (!insertValueAt(current_table, *path, std::move(*value))) {
             return std::unexpected(std::string("duplicate or conflicting TOML key"));
         }
         return {};
@@ -1785,31 +1952,31 @@ private:
      * @param path 表的键路径。
      * @return 目标表指针，或与标量值冲突的错误。
      */
-    static result<node::table*> open_table(
-        node::table& root, const std::vector<std::string>& path,
+    static result<Node::table*> open_table(
+        Node::table& root, const std::vector<std::string>& path,
         bool allow_terminal_array_table = false,
         bool define_terminal_table = true) {
-        node::table* table = &root;
+        Node::table* table = &root;
         for (std::size_t index = 0; index < path.size(); ++index) {
             const auto& part = path[index];
-            auto [iterator, inserted] = table->try_emplace(part, node{node::table{}});
-            if (std::holds_alternative<node::table>(iterator->second.value) &&
+            auto [iterator, inserted] = table->try_emplace(part, Node{Node::table{}});
+            if (std::holds_alternative<Node::table>(iterator->second.value) &&
                 !iterator->second.inline_table) {
                 if (define_terminal_table && !inserted && index + 1 == path.size() &&
-                    iterator->second.definition != node::table_definition::implicit) {
+                    iterator->second.definition != Node::TableDefinition::implicit) {
                     return std::unexpected(std::string("duplicate TOML table definition"));
                 }
                 if (define_terminal_table && index + 1 == path.size()) {
-                    iterator->second.definition = node::table_definition::explicit_table;
+                    iterator->second.definition = Node::TableDefinition::explicit_table;
                 }
-                table = &std::get<node::table>(iterator->second.value);
+                table = &std::get<Node::table>(iterator->second.value);
                 continue;
             }
-            if (auto* array = std::get_if<node::array>(&iterator->second.value);
+            if (auto* array = std::get_if<Node::array>(&iterator->second.value);
                 iterator->second.array_table && array != nullptr && !array->empty() &&
                 (index + 1 < path.size() || allow_terminal_array_table) &&
-                std::holds_alternative<node::table>(array->back().value)) {
-                table = &std::get<node::table>(array->back().value);
+                std::holds_alternative<Node::table>(array->back().value)) {
+                table = &std::get<Node::table>(array->back().value);
                 continue;
             }
             return std::unexpected(std::string("TOML table conflicts with an existing value"));
@@ -1823,8 +1990,8 @@ private:
      * @param path 数组表的键路径。
      * @return 新元素的表指针，或路径冲突错误。
      */
-    static result<node::table*> open_array_table(
-        node::table& root, const std::vector<std::string>& path) {
+    static result<Node::table*> open_array_table(
+        Node::table& root, const std::vector<std::string>& path) {
         if (path.empty()) {
             return std::unexpected(std::string("empty TOML array-table header"));
         }
@@ -1833,22 +2000,36 @@ private:
         if (!parent) {
             return std::unexpected(parent.error());
         }
-        auto [iterator, inserted] = (*parent)->try_emplace(path.back(), node{node::array{}});
+        auto [iterator, inserted] = (*parent)->try_emplace(path.back(), Node{Node::array{}});
         if (!inserted && !iterator->second.array_table) {
             return std::unexpected(std::string("TOML array-table conflicts with another value"));
         }
         iterator->second.array_table = true;
-        auto& values = std::get<node::array>(iterator->second.value);
-        values.emplace_back(node::table{});
-        values.back().definition = node::table_definition::array_element;
-        return &std::get<node::table>(values.back().value);
+        auto& values = std::get<Node::array>(iterator->second.value);
+        values.emplace_back(Node::table{});
+        values.back().definition = Node::TableDefinition::array_element;
+        return &std::get<Node::table>(values.back().value);
     }
 
     std::string_view text_;
-    const parse_options& options_;
-    parse_context context_;
+    const ParseOptions& options_;
+    ParseContext context_;
     std::size_t position_ = 0;
 };
+
+// Keep the public typed API and the benchmark's parse-only phase on the same
+// input checks and document construction path.
+inline result<Node> parseDocument(std::string_view text, const ParseOptions& options) {
+    if (text.size() > options.max_input_bytes) {
+        return std::unexpected(std::string("TOML input exceeds configured size limit"));
+    }
+    DocumentParser parser{text, options};
+    auto parsed = parser.parse();
+    if (!parsed) {
+        return std::unexpected(parsed.error());
+    }
+    return Node{std::move(*parsed)};
+}
 
 /**
  * @brief 将 C++ 值递归编码为内部 TOML 节点。
@@ -1857,7 +2038,7 @@ private:
  * @return 内部节点，或类型不受支持/值超出范围的错误。
  */
 template <class T>
-result<node> encode_value(const T& input);
+result<Node> encodeValue(const T& input);
 
 /**
  * @brief 将内部 TOML 节点递归解码为 C++ 值。
@@ -1867,7 +2048,38 @@ result<node> encode_value(const T& input);
  * @return 解码后的 C++ 值，或类型/范围不匹配错误。
  */
 template <class T>
-result<T> decode_value(const node& input, std::string_view path, const parse_options& options);
+result<T> decodeValue(const Node& input, std::string_view path, const ParseOptions& options);
+
+inline std::string rebaseDecodeError(std::string error, std::string_view path) {
+    constexpr std::string_view root = "value";
+    if (!error.starts_with(root)) return error;
+    std::string rebased;
+    rebased.reserve(path.size() + error.size() - root.size());
+    rebased.append(path);
+    rebased.append(error.substr(root.size()));
+    return rebased;
+}
+
+inline std::string indexedDecodePath(std::string_view path, std::size_t index) {
+    std::array<char, 32> digits{};
+    const auto converted = std::to_chars(digits.data(), digits.data() + digits.size(), index);
+    std::string result;
+    result.reserve(path.size() + 2 + static_cast<std::size_t>(converted.ptr - digits.data()));
+    result.append(path);
+    result.push_back('[');
+    result.append(digits.data(), converted.ptr);
+    result.push_back(']');
+    return result;
+}
+
+inline std::string memberDecodePath(std::string_view path, std::string_view member) {
+    std::string result;
+    result.reserve(path.size() + 1 + member.size());
+    result.append(path);
+    result.push_back('.');
+    result.append(member);
+    return result;
+}
 
 /**
  * @brief 将 C++ 值递归编码为内部 TOML 节点。
@@ -1876,58 +2088,58 @@ result<T> decode_value(const node& input, std::string_view path, const parse_opt
  * @return 内部节点，或类型不受支持/值超出范围的错误。
  */
 template <class T>
-result<node> encode_value(const T& input) {
-    using U = bare_t<T>;
+result<Node> encodeValue(const T& input) {
+    using U = BareT<T>;
 
-    if constexpr (optional_traits<U>::value) {
+    if constexpr (OptionalTraits<U>::value) {
         if (!input) {
-            return node{};
+            return Node{};
         }
-        return encode_value(*input);
-    } else if constexpr (inline_table_traits<U>::value) {
-        auto encoded = encode_value(input.value);
+        return encodeValue(*input);
+    } else if constexpr (InlineTableTraits<U>::value) {
+        auto encoded = encodeValue(input.value);
         if (!encoded) {
             return std::unexpected(encoded.error());
         }
-        if (!std::holds_alternative<node::table>(encoded->value)) {
-            return std::unexpected(std::string("toml::inline_table requires a reflected struct"));
+        if (!std::holds_alternative<Node::table>(encoded->value)) {
+            return std::unexpected(std::string("toml::InlineTable requires a reflected struct"));
         }
-        mark_inline_table(*encoded);
+        markInlineTable(*encoded);
         return encoded;
     } else if constexpr (std::same_as<U, date>) {
         if (!valid_date_value(input)) {
             return std::unexpected(std::string("invalid toml::date value"));
         }
-        return node{input};
+        return Node{input};
     } else if constexpr (std::same_as<U, time>) {
         if (!valid_time_value(input)) {
             return std::unexpected(std::string("invalid toml::time value"));
         }
-        return node{input};
+        return Node{input};
     } else if constexpr (std::same_as<U, local_date_time>) {
         if (!valid_date_value(input.date_part) || !valid_time_value(input.time_part)) {
             return std::unexpected(std::string("invalid toml::local_date_time value"));
         }
-        return node{input};
+        return Node{input};
     } else if constexpr (std::same_as<U, offset_date_time>) {
         if (!valid_date_value(input.local.date_part) ||
             !valid_time_value(input.local.time_part) ||
             input.offset_minutes < -1439 || input.offset_minutes > 1439) {
             return std::unexpected(std::string("invalid toml::offset_date_time value"));
         }
-        return node{input};
+        return Node{input};
     } else if constexpr (std::same_as<U, std::string>) {
         if (!valid_utf8(input)) {
             return std::unexpected(std::string("invalid UTF-8 in TOML string"));
         }
-        return node{input};
+        return Node{input};
     } else if constexpr (std::same_as<U, std::string_view>) {
         if (!valid_utf8(input)) {
             return std::unexpected(std::string("invalid UTF-8 in TOML string"));
         }
-        return node{std::string(input)};
+        return Node{std::string(input)};
     } else if constexpr (std::same_as<U, bool>) {
-        return node{input};
+        return Node{input};
     } else if constexpr (std::is_integral_v<U>) {
         if constexpr (std::is_signed_v<U>) {
             if constexpr (std::numeric_limits<U>::digits >
@@ -1945,23 +2157,23 @@ result<node> encode_value(const T& input) {
                     std::string("integer value is outside TOML's signed 64-bit range"));
             }
         }
-        return node{static_cast<std::int64_t>(input)};
+        return Node{static_cast<std::int64_t>(input)};
     } else if constexpr (std::is_floating_point_v<U>) {
-        return node{static_cast<double>(input)};
+        return Node{static_cast<double>(input)};
     } else if constexpr (std::is_enum_v<U>) {
         using Underlying = std::underlying_type_t<U>;
-        return encode_value(static_cast<Underlying>(input));
-    } else if constexpr (vector_traits<U>::value) {
-        node::array values;
+        return encodeValue(static_cast<Underlying>(input));
+    } else if constexpr (VectorTraits<U>::value) {
+        Node::array values;
         for (const auto& element : input) {
-            using Element = typename vector_traits<U>::value_type;
+            using Element = typename VectorTraits<U>::value_type;
             // `vector<bool>` 暴露的是代理引用；这里先物化声明的元素类型，
             // 同时保留普通 vector 对不可复制元素类型的支持。
             auto encoded = [&]() {
                 if constexpr (std::constructible_from<Element, decltype(element)>) {
-                    return encode_value(static_cast<Element>(element));
+                    return encodeValue(static_cast<Element>(element));
                 } else {
-                    return encode_value(element);
+                    return encodeValue(element);
                 }
             }();
             if (!encoded) {
@@ -1972,15 +2184,15 @@ result<node> encode_value(const T& input) {
             }
             values.push_back(std::move(*encoded));
         }
-        node output{std::move(values)};
-        if constexpr (reflectable<typename vector_traits<U>::value_type>) {
+        Node output{std::move(values)};
+        if constexpr (Reflectable<typename VectorTraits<U>::value_type>) {
             output.array_table = true;
         }
         return output;
-    } else if constexpr (array_traits<U>::value) {
-        node::array values;
+    } else if constexpr (ArrayTraits<U>::value) {
+        Node::array values;
         for (const auto& element : input) {
-            auto encoded = encode_value(element);
+            auto encoded = encodeValue(element);
             if (!encoded) {
                 return std::unexpected(encoded.error());
             }
@@ -1989,18 +2201,18 @@ result<node> encode_value(const T& input) {
             }
             values.push_back(std::move(*encoded));
         }
-        node output{std::move(values)};
-        if constexpr (reflectable<typename array_traits<U>::value_type>) {
+        Node output{std::move(values)};
+        if constexpr (Reflectable<typename ArrayTraits<U>::value_type>) {
             output.array_table = true;
         }
         return output;
-    } else if constexpr (map_traits<U>::value) {
-        node::table values;
+    } else if constexpr (MapTraits<U>::value) {
+        Node::table values;
         for (const auto& [key, element] : input) {
             if (!valid_utf8(key)) {
                 return std::unexpected(std::string("invalid UTF-8 in TOML key"));
             }
-            auto encoded = encode_value(element);
+            auto encoded = encodeValue(element);
             if (!encoded) {
                 return std::unexpected(encoded.error());
             }
@@ -2009,9 +2221,9 @@ result<node> encode_value(const T& input) {
             }
             values.emplace(key, std::move(*encoded));
         }
-        return node{std::move(values)};
-    } else if constexpr (reflectable<U>) {
-        node::table values;
+        return Node{std::move(values)};
+    } else if constexpr (Reflectable<U>) {
+        Node::table values;
         std::string failure;
         bool failed = false;
         for_each_field(input, [&](const auto& descriptor, const auto& object) {
@@ -2025,12 +2237,12 @@ result<node> encode_value(const T& input) {
                 failure = "invalid UTF-8 in reflected TOML key";
                 return;
             }
-            if constexpr (optional_traits<Member>::value) {
+            if constexpr (OptionalTraits<Member>::value) {
                 if (!member) {
                     return;
                 }
             }
-            auto encoded = encode_value(member);
+            auto encoded = encodeValue(member);
             if (!encoded) {
                 failed = true;
                 failure = encoded.error();
@@ -2047,7 +2259,7 @@ result<node> encode_value(const T& input) {
         if (failed) {
             return std::unexpected(std::move(failure));
         }
-        return node{std::move(values)};
+        return Node{std::move(values)};
     } else {
         return std::unexpected(std::string("unsupported type in TOML serializer"));
     }
@@ -2058,7 +2270,7 @@ result<node> encode_value(const T& input) {
  * @param key 待判断的键名。
  * @return 键只含字母、数字、下划线或连字符时返回 `true`。
  */
-inline bool bare_key(std::string_view key) {
+inline bool bareKey(std::string_view key) {
     if (key.empty()) {
         return false;
     }
@@ -2078,8 +2290,8 @@ inline bool bare_key(std::string_view key) {
  * @param key 原始键名。
  * @return 裸键或经过转义的基本字符串键。
  */
-inline std::string format_key(std::string_view key) {
-    if (bare_key(key)) {
+inline std::string formatKey(std::string_view key) {
+    if (bareKey(key)) {
         return std::string(key);
     }
     std::string result = "\"";
@@ -2116,7 +2328,7 @@ inline std::string format_key(std::string_view key) {
  * @param value 待输出的数字。
  * @param width 最小输出宽度。
  */
-inline void append_padded_decimal(std::string& output, unsigned value,
+inline void appendPaddedDecimal(std::string& output, unsigned value,
                                   unsigned width) {
     std::array<char, 16> digits{};
     for (unsigned index = 0; index < width; ++index) {
@@ -2131,12 +2343,12 @@ inline void append_padded_decimal(std::string& output, unsigned value,
  * @param value 待格式化的日期。
  * @param output 目标字符串。
  */
-inline void append_date_text(const date& value, std::string& output) {
-    append_padded_decimal(output, static_cast<unsigned>(value.year), 4);
+inline void appendDateText(const date& value, std::string& output) {
+    appendPaddedDecimal(output, static_cast<unsigned>(value.year), 4);
     output.push_back('-');
-    append_padded_decimal(output, value.month, 2);
+    appendPaddedDecimal(output, value.month, 2);
     output.push_back('-');
-    append_padded_decimal(output, value.day, 2);
+    appendPaddedDecimal(output, value.day, 2);
 }
 
 /**
@@ -2144,12 +2356,12 @@ inline void append_date_text(const date& value, std::string& output) {
  * @param value 待格式化的时间。
  * @param output 目标字符串。
  */
-inline void append_time_text(const time& value, std::string& output) {
-    append_padded_decimal(output, value.hour, 2);
+inline void appendTimeText(const time& value, std::string& output) {
+    appendPaddedDecimal(output, value.hour, 2);
     output.push_back(':');
-    append_padded_decimal(output, value.minute, 2);
+    appendPaddedDecimal(output, value.minute, 2);
     output.push_back(':');
-    append_padded_decimal(output, value.second, 2);
+    appendPaddedDecimal(output, value.second, 2);
     if (!value.fractional_second.empty()) {
         output.push_back('.');
         output += value.fractional_second;
@@ -2161,11 +2373,11 @@ inline void append_time_text(const time& value, std::string& output) {
  * @param value 待格式化的本地日期时间。
  * @param output 目标字符串。
  */
-inline void append_local_date_time_text(const local_date_time& value,
+inline void appendLocalDateTimeText(const local_date_time& value,
                                         std::string& output) {
-    append_date_text(value.date_part, output);
+    appendDateText(value.date_part, output);
     output.push_back('T');
-    append_time_text(value.time_part, output);
+    appendTimeText(value.time_part, output);
 }
 
 /**
@@ -2173,18 +2385,18 @@ inline void append_local_date_time_text(const local_date_time& value,
  * @param value 待格式化的带偏移日期时间。
  * @param output 目标字符串。
  */
-inline void append_offset_date_time_text(const offset_date_time& value,
+inline void appendOffsetDateTimeText(const offset_date_time& value,
                                          std::string& output) {
-    append_local_date_time_text(value.local, output);
+    appendLocalDateTimeText(value.local, output);
     if (value.offset_minutes == 0) {
         output.push_back('Z');
         return;
     }
     const int magnitude = std::abs(value.offset_minutes);
     output.push_back(value.offset_minutes < 0 ? '-' : '+');
-    append_padded_decimal(output, static_cast<unsigned>(magnitude / 60), 2);
+    appendPaddedDecimal(output, static_cast<unsigned>(magnitude / 60), 2);
     output.push_back(':');
-    append_padded_decimal(output, static_cast<unsigned>(magnitude % 60), 2);
+    appendPaddedDecimal(output, static_cast<unsigned>(magnitude % 60), 2);
 }
 
 /**
@@ -2194,7 +2406,7 @@ inline void append_offset_date_time_text(const offset_date_time& value,
  * @param failure 失败时写入错误描述。
  * @return 输出成功时返回 `true`，否则返回 `false`。
  */
-inline bool append_inline(const node& value, std::string& output,
+inline bool appendInline(const Node& value, std::string& output,
                           std::string& failure) {
     return std::visit(
         [&](const auto& item) -> bool {
@@ -2228,16 +2440,16 @@ inline bool append_inline(const node& value, std::string& output,
                 output.append(buffer, end);
                 return true;
             } else if constexpr (std::same_as<Item, date>) {
-                append_date_text(item, output);
+                appendDateText(item, output);
                 return true;
             } else if constexpr (std::same_as<Item, time>) {
-                append_time_text(item, output);
+                appendTimeText(item, output);
                 return true;
             } else if constexpr (std::same_as<Item, local_date_time>) {
-                append_local_date_time_text(item, output);
+                appendLocalDateTimeText(item, output);
                 return true;
             } else if constexpr (std::same_as<Item, offset_date_time>) {
-                append_offset_date_time_text(item, output);
+                appendOffsetDateTimeText(item, output);
                 return true;
             } else if constexpr (std::same_as<Item, std::string>) {
                 output.push_back('"');
@@ -2266,28 +2478,28 @@ inline bool append_inline(const node& value, std::string& output,
                 }
                 output.push_back('"');
                 return true;
-            } else if constexpr (std::same_as<Item, node::array>) {
+            } else if constexpr (std::same_as<Item, Node::array>) {
                 output.push_back('[');
                 for (std::size_t index = 0; index < item.size(); ++index) {
                     if (index != 0) {
                         output += ", ";
                     }
-                    if (!append_inline(item[index], output, failure)) {
+                    if (!appendInline(item[index], output, failure)) {
                         return false;
                     }
                 }
                 output.push_back(']');
                 return true;
-            } else if constexpr (std::same_as<Item, node::table>) {
+            } else if constexpr (std::same_as<Item, Node::table>) {
                 output.push_back('{');
                 std::size_t index = 0;
                 for (const auto& [key, child] : item) {
                     if (index++ != 0) {
                         output += ", ";
                     }
-                    output += format_key(key);
+                    output += formatKey(key);
                     output += " = ";
-                    if (!append_inline(child, output, failure)) {
+                    if (!appendInline(child, output, failure)) {
                         return false;
                     }
                 }
@@ -2304,14 +2516,14 @@ inline bool append_inline(const node& value, std::string& output,
  * @param key 要追加的键名。
  * @param output 目标字符串。
  */
-inline void append_key_path(std::string_view prefix, std::string_view key,
+inline void appendKeyPath(std::string_view prefix, std::string_view key,
                             std::string& output) {
     if (prefix.empty()) {
-        output += format_key(key);
+        output += formatKey(key);
     } else {
         output += prefix;
         output.push_back('.');
-        output += format_key(key);
+        output += formatKey(key);
     }
 }
 
@@ -2320,16 +2532,16 @@ inline void append_key_path(std::string_view prefix, std::string_view key,
  * @param value 待检查的节点。
  * @return 数组表底层数组指针；不是数组表或为空时返回 `nullptr`。
  */
-inline const node::array* table_array(const node& value) {
+inline const Node::array* tableArray(const Node& value) {
     if (!value.array_table) {
         return nullptr;
     }
-    const auto* values = std::get_if<node::array>(&value.value);
+    const auto* values = std::get_if<Node::array>(&value.value);
     if (values == nullptr || values->empty()) {
         return nullptr;
     }
     for (const auto& element : *values) {
-        if (!std::holds_alternative<node::table>(element.value) || element.inline_table) {
+        if (!std::holds_alternative<Node::table>(element.value) || element.inline_table) {
             return nullptr;
         }
     }
@@ -2344,23 +2556,23 @@ inline const node::array* table_array(const node& value) {
  * @param failure 失败时写入错误描述。
  * @return 输出成功时返回 `true`，否则返回 `false`。
  */
-inline bool append_table(const node::table& table, std::string_view prefix,
+inline bool appendTable(const Node::table& table, std::string_view prefix,
                          std::string& output, std::string& failure) {
     for (const auto& [key, value] : table) {
-        if ((std::holds_alternative<node::table>(value.value) && !value.inline_table) ||
-            table_array(value) != nullptr) {
+        if ((std::holds_alternative<Node::table>(value.value) && !value.inline_table) ||
+            tableArray(value) != nullptr) {
             continue;
         }
-        output += format_key(key);
+        output += formatKey(key);
         output += " = ";
-        if (!append_inline(value, output, failure)) {
+        if (!appendInline(value, output, failure)) {
             return false;
         }
         output.push_back('\n');
     }
 
     for (const auto& [key, value] : table) {
-        const auto* child = std::get_if<node::table>(&value.value);
+        const auto* child = std::get_if<Node::table>(&value.value);
         if (child == nullptr || value.inline_table) {
             continue;
         }
@@ -2369,28 +2581,28 @@ inline bool append_table(const node::table& table, std::string_view prefix,
         }
         output.push_back('\n');
         std::string section;
-        append_key_path(prefix, key, section);
-        output += "[" + section + "]\n";
-        if (!append_table(*child, section, output, failure)) {
+        appendKeyPath(prefix, key, section);
+    output += "[" + section + "]\n";
+    if (!appendTable(*child, section, output, failure)) {
             return false;
         }
     }
 
     for (const auto& [key, value] : table) {
-        const auto* values = table_array(value);
+        const auto* values = tableArray(value);
         if (values == nullptr) {
             continue;
         }
         std::string section;
-        append_key_path(prefix, key, section);
+        appendKeyPath(prefix, key, section);
         for (const auto& element : *values) {
-            const auto& child = std::get<node::table>(element.value);
+            const auto& child = std::get<Node::table>(element.value);
             if (!output.empty() && output.back() != '\n') {
                 output.push_back('\n');
             }
             output.push_back('\n');
             output += "[[" + section + "]]\n";
-            if (!append_table(child, section, output, failure)) {
+            if (!appendTable(child, section, output, failure)) {
                 return false;
             }
         }
@@ -2406,21 +2618,21 @@ inline bool append_table(const node::table& table, std::string_view prefix,
  * @return 解码后的 C++ 值，或类型/范围不匹配错误。
  */
 template <class T>
-result<T> decode_value(const node& input, std::string_view path, const parse_options& options) {
-    using U = bare_t<T>;
+result<T> decodeValue(const Node& input, std::string_view path, const ParseOptions& options) {
+    using U = BareT<T>;
     const auto where = path.empty() ? std::string("value") : std::string(path);
 
-    if constexpr (optional_traits<U>::value) {
+    if constexpr (OptionalTraits<U>::value) {
         if (std::holds_alternative<std::monostate>(input.value)) {
             return U{};
         }
-        auto decoded = decode_value<typename optional_traits<U>::value_type>(input, path, options);
+        auto decoded = decodeValue<typename OptionalTraits<U>::value_type>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
         return U{std::move(*decoded)};
-    } else if constexpr (inline_table_traits<U>::value) {
-        auto decoded = decode_value<typename inline_table_traits<U>::value_type>(input, path, options);
+    } else if constexpr (InlineTableTraits<U>::value) {
+        auto decoded = decodeValue<typename InlineTableTraits<U>::value_type>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
@@ -2491,13 +2703,13 @@ result<T> decode_value(const node& input, std::string_view path, const parse_opt
         return std::unexpected(where + " must be a TOML number");
     } else if constexpr (std::is_enum_v<U>) {
         using Underlying = std::underlying_type_t<U>;
-        auto decoded = decode_value<Underlying>(input, path, options);
+        auto decoded = decodeValue<Underlying>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
         return static_cast<U>(*decoded);
-    } else if constexpr (vector_traits<U>::value) {
-        const auto* values = std::get_if<node::array>(&input.value);
+    } else if constexpr (VectorTraits<U>::value) {
+        const auto* values = std::get_if<Node::array>(&input.value);
         if (values == nullptr) {
             return std::unexpected(where + " must be a TOML array");
         }
@@ -2506,46 +2718,49 @@ result<T> decode_value(const node& input, std::string_view path, const parse_opt
             output.reserve(values->size());
         }
         for (std::size_t index = 0; index < values->size(); ++index) {
-            auto decoded = decode_value<typename vector_traits<U>::value_type>(
-                (*values)[index], where + "[" + std::to_string(index) + "]", options);
+            auto decoded = decodeValue<typename VectorTraits<U>::value_type>(
+                (*values)[index], {}, options);
             if (!decoded) {
-                return std::unexpected(decoded.error());
+                return std::unexpected(rebaseDecodeError(
+                    decoded.error(), indexedDecodePath(where, index)));
             }
             output.push_back(std::move(*decoded));
         }
         return output;
-    } else if constexpr (array_traits<U>::value) {
-        const auto* values = std::get_if<node::array>(&input.value);
-        if (values == nullptr || values->size() != array_traits<U>::size) {
+    } else if constexpr (ArrayTraits<U>::value) {
+        const auto* values = std::get_if<Node::array>(&input.value);
+        if (values == nullptr || values->size() != ArrayTraits<U>::size) {
             return std::unexpected(where + " has the wrong TOML array size");
         }
         U output{};
         for (std::size_t index = 0; index < values->size(); ++index) {
-            auto decoded = decode_value<typename array_traits<U>::value_type>(
-                (*values)[index], where + "[" + std::to_string(index) + "]", options);
+            auto decoded = decodeValue<typename ArrayTraits<U>::value_type>(
+                (*values)[index], {}, options);
             if (!decoded) {
-                return std::unexpected(decoded.error());
+                return std::unexpected(rebaseDecodeError(
+                    decoded.error(), indexedDecodePath(where, index)));
             }
             output[index] = std::move(*decoded);
         }
         return output;
-    } else if constexpr (map_traits<U>::value) {
-        const auto* values = std::get_if<node::table>(&input.value);
+    } else if constexpr (MapTraits<U>::value) {
+        const auto* values = std::get_if<Node::table>(&input.value);
         if (values == nullptr) {
             return std::unexpected(where + " must be a TOML table");
         }
         U output;
         for (const auto& [key, value] : *values) {
-            auto decoded = decode_value<typename map_traits<U>::mapped_type>(
-                value, where + "." + key, options);
+            auto decoded = decodeValue<typename MapTraits<U>::mapped_type>(
+                value, {}, options);
             if (!decoded) {
-                return std::unexpected(decoded.error());
+                return std::unexpected(rebaseDecodeError(
+                    decoded.error(), memberDecodePath(where, key)));
             }
             output.emplace(key, std::move(*decoded));
         }
         return output;
-    } else if constexpr (reflectable<U>) {
-        const auto* values = std::get_if<node::table>(&input.value);
+    } else if constexpr (Reflectable<U>) {
+        const auto* values = std::get_if<Node::table>(&input.value);
         if (values == nullptr) {
             return std::unexpected(where + " must be a TOML table");
         }
@@ -2568,7 +2783,7 @@ result<T> decode_value(const node& input, std::string_view path, const parse_opt
                 } else {
                     const auto iterator = values->find(std::string(descriptor.name));
                     if (iterator == values->end()) {
-                        if constexpr (optional_traits<Member>::value) {
+                        if constexpr (OptionalTraits<Member>::value) {
                             return;
                         } else {
                             failed = true;
@@ -2577,18 +2792,18 @@ result<T> decode_value(const node& input, std::string_view path, const parse_opt
                         }
                         return;
                     }
-                    auto decoded = decode_value<Member>(
-                        iterator->second,
-                        where + "." + std::string(descriptor.name), options);
+                    auto decoded = decodeValue<Member>(
+                        iterator->second, {}, options);
                     if (!decoded) {
                         failed = true;
-                        failure = decoded.error();
+                        failure = rebaseDecodeError(
+                            decoded.error(), memberDecodePath(where, descriptor.name));
                         return;
                     }
                     descriptor.get(object) = std::move(*decoded);
                 }
             });
-            if (!failed && options.unknown_fields == unknown_field_policy::reject) {
+            if (!failed && options.unknown_fields == UnknownFieldPolicy::reject) {
                 for (const auto& [key, ignored] : *values) {
                     bool known = false;
                     std::apply([&](const auto&... descriptor) {
@@ -2622,19 +2837,19 @@ result<T> decode_value(const node& input, std::string_view path, const parse_opt
  */
 template <class T>
 result<std::string> serialize(const T& value,
-                              const serialize_options& options = {}) {
+                              const SerializeOptions& options = {}) {
     try {
-        auto encoded = detail::encode_value(value);
+        auto encoded = detail::encodeValue(value);
         if (!encoded) {
             return std::unexpected(encoded.error());
         }
-        const auto* root = std::get_if<typename detail::node::table>(&encoded->value);
+        const auto* root = std::get_if<typename detail::Node::table>(&encoded->value);
         if (root == nullptr) {
             return std::unexpected(std::string("TOML serialization requires a reflected struct/table at the root"));
         }
         std::string output;
         std::string failure;
-        if (!detail::append_table(*root, {}, output, failure)) {
+        if (!detail::appendTable(*root, {}, output, failure)) {
             return std::unexpected(std::move(failure));
         }
         if (output.size() > options.max_output_bytes) {
@@ -2657,7 +2872,7 @@ result<std::string> serialize(const T& value,
  * @return 与 `serialize` 相同的 TOML 文本或错误结果。
  */
 template <class T>
-result<std::string> try_serialize(const T& value, const serialize_options& options = {}) {
+result<std::string> try_serialize(const T& value, const SerializeOptions& options = {}) {
     return serialize(value, options);
 }
 
@@ -2669,18 +2884,13 @@ result<std::string> try_serialize(const T& value, const serialize_options& optio
  */
 template <class T>
 result<T> deserialize(std::string_view text,
-                      const parse_options& options = {}) {
+                      const ParseOptions& options = {}) {
     try {
-        if (text.size() > options.max_input_bytes) {
-            return std::unexpected(std::string("TOML input exceeds configured size limit"));
-        }
-        detail::document_parser parser(text, options);
-        auto parsed = parser.parse();
+        auto parsed = detail::parseDocument(text, options);
         if (!parsed) {
             return std::unexpected(parsed.error());
         }
-        detail::node root{std::move(*parsed)};
-        return detail::decode_value<T>(root, {}, options);
+        return detail::decodeValue<T>(*parsed, {}, options);
     } catch (const std::bad_alloc&) {
         return std::unexpected(std::string("TOML operation exhausted memory"));
     } catch (const std::exception& error) {
@@ -2697,7 +2907,7 @@ result<T> deserialize(std::string_view text,
  * @return 与 `deserialize<T>` 相同的结果。
  */
 template <class T>
-result<T> deserializee(std::string_view text, const parse_options& options = {}) {
+result<T> deserializee(std::string_view text, const ParseOptions& options = {}) {
     return deserialize<T>(text, options);
 }
 
@@ -2708,7 +2918,7 @@ result<T> deserializee(std::string_view text, const parse_options& options = {})
  * @return 与 `deserialize<T>` 相同的结果。
  */
 template <class T>
-result<T> deSerialize(std::string_view text, const parse_options& options = {}) {
+result<T> deSerialize(std::string_view text, const ParseOptions& options = {}) {
     return deserialize<T>(text, options);
 }
 

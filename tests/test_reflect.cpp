@@ -27,7 +27,7 @@ REFLECT_FIELDS(renamed, RENAMED_FIELDS)
 }  // namespace sample
 
 int main() {
-    static_assert(reflect::reflectable<sample::settings>);
+    static_assert(reflect::Reflectable<sample::settings>);
     sample::settings value{"localhost", 8080};
     std::vector<std::string> names;
     reflect::for_each_field(value, [&](const auto& descriptor, auto&) {

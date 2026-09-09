@@ -224,26 +224,26 @@ int main() {
     const auto escaped_key_input = toml::deserialize<EscapedKey>("\"\\u0001\" = 7\n");
     passed &= escaped_key_input && escaped_key_input->value == 7;
 
-    const toml::parse_options limited_input{.max_input_bytes = 4};
+    const toml::ParseOptions limited_input{.max_input_bytes = 4};
     passed &= expect_error(toml::deserialize<Scalar>("value = 1\n", limited_input),
                            "input", "input size limit");
 
-    toml::parse_options limited_depth;
+    toml::ParseOptions limited_depth;
     limited_depth.max_depth = 2;
     passed &= expect_error(toml::deserialize<Scalar>("value = [[1]]\n", limited_depth),
                            "depth", "nesting depth limit");
 
-    toml::parse_options limited_array;
+    toml::ParseOptions limited_array;
     limited_array.max_array_items = 2;
     passed &= expect_error(toml::deserialize<OptionalArray>("values = [1, 2, 3]\n", limited_array),
                            "item count", "array item limit");
 
-    toml::parse_options strict_schema;
-    strict_schema.unknown_fields = toml::unknown_field_policy::reject;
+    toml::ParseOptions strict_schema;
+    strict_schema.unknown_fields = toml::UnknownFieldPolicy::reject;
     passed &= expect_error(toml::deserialize<Scalar>("value = 1\nextra = 2\n", strict_schema),
                            "unknown field", "strict unknown field policy");
 
-    toml::serialize_options limited_output;
+    toml::SerializeOptions limited_output;
     limited_output.max_output_bytes = 1;
     passed &= expect_error(toml::serialize(Text{"hello"}, limited_output),
                            "output", "output size limit");

@@ -3,11 +3,10 @@ export module reflect;
 export import std;
 
 /**
- * @brief Compiler-independent reflection vocabulary shared by serializers.
+ * @brief 编译器无关的反射词汇，供序列化器共享。
  *
- * The module intentionally exposes no compiler metaobject handles. A
- * serializer can therefore be compiled by Clang/LLVM while a separate GCC
- * build uses C++26 reflection only to generate local metadata.
+ * 该模块有意不暴露编译器元对象句柄。因此序列化器可以由 Clang/LLVM 编译，
+ * 而单独的 GCC 构建仅使用 C++26 反射来生成本地元数据。
  */
 export namespace reflect {
 
@@ -30,32 +29,32 @@ constexpr auto make_field(std::string_view name, Member Owner::*pointer) noexcep
 namespace detail {
 
 template <class T>
-concept has_reflect_fields = requires(const std::remove_cvref_t<T>& value) {
+concept hasReflectFields = requires(const std::remove_cvref_t<T>& value) {
     reflect_fields(value);
 };
 
 template <class T>
-concept has_any_fields = has_reflect_fields<T>;
+concept hasAnyFields = hasReflectFields<T>;
 
 template <class T>
-    requires has_reflect_fields<T>
-constexpr decltype(auto) get_fields(const T& value) {
+    requires hasReflectFields<T>
+constexpr decltype(auto) getFields(const T& value) {
     return reflect_fields(value);
 }
 
 }  // namespace detail
 
 template <class T>
-concept reflectable = detail::has_any_fields<T>;
+concept Reflectable = detail::hasAnyFields<T>;
 
 template <class T>
-    requires reflectable<T>
+    requires Reflectable<T>
 constexpr decltype(auto) fields(const T& value) {
-    return detail::get_fields(value);
+    return detail::getFields(value);
 }
 
 template <class T, class Function>
-    requires reflectable<T>
+    requires Reflectable<T>
 constexpr void for_each_field(T& value, Function&& function) {
     auto descriptors = fields(value);
     std::apply(
@@ -66,9 +65,11 @@ constexpr void for_each_field(T& value, Function&& function) {
 }
 
 #if defined(__cpp_impl_reflection) && __cpp_impl_reflection >= 202506L
-inline constexpr bool native_reflection_available = true;
+inline constexpr bool nativeReflectionAvailable = true;
 #else
-inline constexpr bool native_reflection_available = false;
+inline constexpr bool nativeReflectionAvailable = false;
 #endif
+
+inline constexpr bool native_reflection_available = nativeReflectionAvailable;
 
 }  // namespace reflect

@@ -2,3 +2,5 @@ target/
 .mcpp/
 .vscode/
 compile_commands.json
+docs/plans
+.claude/

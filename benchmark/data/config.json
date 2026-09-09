@@ -1,0 +1,1 @@
+{"application":"serde benchmark","enabled":true,"retries":5,"ratio":0.875,"tags":["toml","simd","unicode"],"limits":{"warning":70,"critical":90},"owner":{"name":"Ada Lovelace","team":"runtime"},"servers":[{"host":"cache-a","port":9000,"zones":["cn-sh","us-west"]},{"host":"cache-b","port":9001,"zones":["eu-central","ap-south"]}],"message":"rocket \uD83D\uDE80 and alpha \u03B1"}
