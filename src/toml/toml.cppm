@@ -115,8 +115,6 @@ struct InlineTable {
     bool operator==(const InlineTable& other) const = default;
 };
 
-template <class T>
-using inline_table = InlineTable<T>;
 
 /**
  * @brief 保存反射字段名称及其成员指针的描述符。
@@ -136,10 +134,6 @@ using reflect::make_field;
  */
 template <class T>
 concept Reflectable = reflect::Reflectable<T>;
-
-using parse_options = ParseOptions;
-using serialize_options = SerializeOptions;
-using unknown_field_policy = UnknownFieldPolicy;
 
 /**
  * @brief 遍历对象的全部反射字段。
@@ -2858,17 +2852,6 @@ result<std::string> serialize(const T& value,
 }
 
 /**
- * @brief `serialize` 的兼容别名。
- * @tparam T 待序列化的对象类型。
- * @param value 待序列化的对象。
- * @return 与 `serialize` 相同的 TOML 文本或错误结果。
- */
-template <class T>
-result<std::string> try_serialize(const T& value, const SerializeOptions& options = {}) {
-    return serialize(value, options);
-}
-
-/**
  * @brief 将 TOML 文本解析并转换为指定的 C++ 类型。
  * @tparam T 目标 C++ 类型。
  * @param text 待解析的 TOML 文本。
@@ -2882,28 +2865,6 @@ result<T> deserialize(std::string_view text,
         return std::unexpected(parsed.error());
     }
     return detail::decodeValue<T>(*parsed, {}, options);
-}
-
-/**
- * @brief `deserialize` 的历史拼写兼容别名。
- * @tparam T 目标 C++ 类型。
- * @param text 待解析的 TOML 文本。
- * @return 与 `deserialize<T>` 相同的结果。
- */
-template <class T>
-result<T> deserializee(std::string_view text, const ParseOptions& options = {}) {
-    return deserialize<T>(text, options);
-}
-
-/**
- * @brief `deserialize` 的大小写兼容别名。
- * @tparam T 目标 C++ 类型。
- * @param text 待解析的 TOML 文本。
- * @return 与 `deserialize<T>` 相同的结果。
- */
-template <class T>
-result<T> deSerialize(std::string_view text, const ParseOptions& options = {}) {
-    return deserialize<T>(text, options);
 }
 
 }  // 命名空间 toml

@@ -63,7 +63,7 @@ toml::result<std::string> toml::serialize(const T&);
 toml::result<T> toml::deserialize<T>(std::string_view);
 ```
 
-`toml::result<T>` 就是 `std::expected<T, std::string>`。因此两个方向报告失败时均不抛出异常。`try_serialize` 是 `serialize` 的等效兼容别名；`deserializee` 和 `deSerialize` 是 `deserialize` 的等效兼容别名。
+`toml::result<T>` 就是 `std::expected<T, std::string>`。因此两个方向报告失败时均不抛出异常。
 
 未知 TOML 字段被忽略。缺少非可选字段和类型/范围不匹配作为错误返回。
 
@@ -71,7 +71,7 @@ toml::result<T> toml::deserialize<T>(std::string_view);
 
 这是一个广泛覆盖的自包含实现，并非声称完整的 TOML 1.0 合规套件覆盖。特别是，在依赖超出文档固定用例的不寻常词法边缘情况之前，应对照 TOML 规范进行验证。
 
-支持的 C++ 值类型包括：`std::string`、布尔值、适合 TOML 有符号 64 位范围的有符号和无符号整数、浮点值、枚举、`std::optional`、`std::vector`、`std::array`、字符串键的 `std::map` 和 `std::unordered_map`、递归反射结构体，以及公共时间类型 `toml::date`、`toml::time`、`toml::local_date_time` 和 `toml::offset_date_time`。当反射成员必须写为 `{ key = value }` 时，用 `toml::inline_table<T>` 包装；反射结构体的 `std::vector` 写为表数组。
+支持的 C++ 值类型包括：`std::string`、布尔值、适合 TOML 有符号 64 位范围的有符号和无符号整数、浮点值、枚举、`std::optional`、`std::vector`、`std::array`、字符串键的 `std::map` 和 `std::unordered_map`、递归反射结构体，以及公共时间类型 `toml::date`、`toml::time`、`toml::local_date_time` 和 `toml::offset_date_time`。当反射成员必须写为 `{ key = value }` 时，用 `toml::InlineTable<T>` 包装；反射结构体的 `std::vector` 写为表数组。
 
 序列化器刻意保持规范：生成有效的确定性 TOML，但无法保留纯词法输入细节，如注释、引号样式、数字下划线或进制、空白、键排序和原始表布局。解析器和写入器独立测试，因此解析不仅验证库自身的输出。
 

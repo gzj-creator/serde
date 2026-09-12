@@ -210,13 +210,7 @@ using time = toml::time;
 using local_date_time = toml::local_date_time;
 using offset_date_time = toml::offset_date_time;
 template <class T>
-using inline_table = toml::inline_table<T>;
-
-using parse_options = ParseOptions;
-using serialize_options = SerializeOptions;
-using unknown_field_policy = UnknownFieldPolicy;
-using non_finite_policy = NonFinitePolicy;
-using duplicate_key_policy = DuplicateKeyPolicy;
+using InlineTable = toml::InlineTable<T>;
 
 template <class Owner, class Member>
 using field = reflect::field<Owner, Member>;
@@ -295,7 +289,7 @@ struct InlineTableTraits {
 };
 
 template <class T>
-struct InlineTableTraits<inline_table<T>> {
+struct InlineTableTraits<InlineTable<T>> {
     static constexpr bool value = true;
     using value_type = T;
 };
@@ -1279,21 +1273,6 @@ result<T> deserialize(std::string_view text, const ParseOptions& options = {}) {
     auto parsed = detail::thread_parser().parse(text, options);
     if (!parsed) return std::unexpected(parsed.error());
     return decode<T>(*parsed, options);
-}
-
-template <class T>
-result<std::string> try_serialize(const T& value, const SerializeOptions& options = {}) {
-    return serialize(value, options);
-}
-
-template <class T>
-result<T> deserializee(std::string_view text, const ParseOptions& options = {}) {
-    return deserialize<T>(text, options);
-}
-
-template <class T>
-result<T> deSerialize(std::string_view text, const ParseOptions& options = {}) {
-    return deserialize<T>(text, options);
 }
 
 }  // namespace json

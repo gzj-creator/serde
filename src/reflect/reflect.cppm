@@ -70,6 +70,4 @@ inline constexpr bool nativeReflectionAvailable = true;
 inline constexpr bool nativeReflectionAvailable = false;
 #endif
 
-inline constexpr bool native_reflection_available = nativeReflectionAvailable;
-
 }  // namespace reflect

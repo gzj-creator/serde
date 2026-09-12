@@ -30,12 +30,13 @@
 ### 变更
 
 - 将 `reflect` 模块中的 concept 和函数重命名为 PascalCase（`hasReflectFields`、`Reflectable`、`getFields`），保持与 C++ 标准库命名风格一致。
-- 将 `toml` 模块中的枚举、结构体和 concept 重命名为 PascalCase（`UnknownFieldPolicy`、`ParseOptions`、`SerializeOptions`、`InlineTable`、`Reflectable`），同时保留旧名称的 type alias 以维持向后兼容。
+- 将 `toml` 模块中的枚举、结构体和 concept 重命名为 PascalCase（`UnknownFieldPolicy`、`ParseOptions`、`SerializeOptions`、`InlineTable`、`Reflectable`），不再保留旧名称的兼容别名。
 - JSON 解析改为 `json::Json` 包装 simdjson DOM；`ParseOptions` 以独立的 `duplicate_keys` 与 `enforce_document_limits` 控制重复键和文档上限。
 - 库以 `-fno-exceptions` 构建；JSON/TOML 不再把内存耗尽转成 `expected`，TOML 编解码去掉已失效的 try/catch。
 - `json::detail` 不再随模块导出，对外只保留公开 API。
 - 为 JSON/TOML 的空白符、字符串和 ASCII UTF-8 扫描增加 SSE2 快速路径。
 - 删除 `probes/gcc_reflection.cpp`、`src/reflect/README.md`、`src/toml/README.md` 等不再使用的文件。
+- 删除 `reflect`、`toml`、`json` 的旧拼写兼容别名（`native_reflection_available`、`inline_table`、`parse_options`、`try_serialize`、`deserializee`、`deSerialize` 等），全量重构后统一使用 PascalCase 与标准命名。
 
 ### 文档
 

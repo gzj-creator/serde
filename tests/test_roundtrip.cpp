@@ -84,7 +84,7 @@ struct Settings {
     std::vector<std::vector<int>> matrix;
     std::map<std::string, int> thresholds;
     std::unordered_map<std::string, bool> switches;
-    toml::inline_table<Credentials> inline_credentials;
+    toml::InlineTable<Credentials> inline_credentials;
     Endpoint endpoint;
     std::vector<Plugin> plugins;
 
@@ -122,13 +122,7 @@ REFLECT_FIELDS(Settings, SETTINGS_FIELDS)
 
 static_assert(std::same_as<decltype(toml::serialize(std::declval<const Settings&>())),
                            std::expected<std::string, std::string>>);
-static_assert(std::same_as<decltype(toml::try_serialize(std::declval<const Settings&>())),
-                           std::expected<std::string, std::string>>);
 static_assert(std::same_as<decltype(toml::deserialize<Settings>(std::string_view{})),
-                           std::expected<Settings, std::string>>);
-static_assert(std::same_as<decltype(toml::deserializee<Settings>(std::string_view{})),
-                           std::expected<Settings, std::string>>);
-static_assert(std::same_as<decltype(toml::deSerialize<Settings>(std::string_view{})),
                            std::expected<Settings, std::string>>);
 
 /**
@@ -179,18 +173,9 @@ int main() {
     }
 
     const auto canonical = toml::deserialize<Settings>(*serialized);
-    const auto legacy_typo = toml::deserializee<Settings>(*serialized);
-    const auto legacy_casing = toml::deSerialize<Settings>(*serialized);
-    const auto alias_serialize = toml::try_serialize(original);
 
     bool passed = true;
     passed &= expect(canonical && *canonical == original,
                      "serialize and deserialize preserve every supported field");
-    passed &= expect(legacy_typo && *legacy_typo == original,
-                     "deserializee remains an equivalent compatibility alias");
-    passed &= expect(legacy_casing && *legacy_casing == original,
-                     "deSerialize remains an equivalent compatibility alias");
-    passed &= expect(alias_serialize && *alias_serialize == *serialized,
-                     "try_serialize is the symmetric serialize alias");
     return passed ? 0 : 1;
 }

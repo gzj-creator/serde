@@ -21,7 +21,7 @@ struct NestedFlag {
 REFLECT_FIELDS(NestedFlag, SERDE_FIELDS_19)
 #undef SERDE_FIELDS_19
 
-struct InlineTable {
+struct InlineFixture {
     std::string name;
     int count{};
     NestedFlag nested;
@@ -31,14 +31,14 @@ struct InlineTable {
      * @param other 待比较的内联表。
      * @return 所有字段均相同时返回 `true`。
      */
-    bool operator==(const InlineTable& other) const = default;
+    bool operator==(const InlineFixture& other) const = default;
 };
 
 #define SERDE_FIELDS_20(X) \
     X(name) \
     X(count) \
     X(nested)
-REFLECT_FIELDS(InlineTable, SERDE_FIELDS_20)
+REFLECT_FIELDS(InlineFixture, SERDE_FIELDS_20)
 #undef SERDE_FIELDS_20
 
 struct DottedParent {
@@ -176,7 +176,7 @@ struct SyntaxDocument {
     std::vector<int> numbers;
     std::vector<int> multiline_array;
     std::vector<std::vector<int>> nested_array;
-    InlineTable inline_table;
+    InlineFixture inline_table;
     Dotted dotted;
     RegularTable table;
     std::vector<Product> products;
@@ -290,7 +290,7 @@ int main() {
                          value.multiline_array == std::vector<int>{1, 2, 3} &&
                          value.nested_array == std::vector<std::vector<int>>{{1, 2}, {3, 4}},
                      "single-line, multiline, and nested arrays parse correctly");
-    passed &= expect(value.inline_table == InlineTable{"inline table", 2, {true}} &&
+    passed &= expect(value.inline_table == InlineFixture{"inline table", 2, {true}} &&
                          value.dotted == Dotted{{"dotted key"}} &&
                          value.table == RegularTable{"regular table", {false, {"one", "two"}}},
                      "inline tables, dotted keys, and regular tables parse correctly");

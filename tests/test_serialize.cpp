@@ -46,7 +46,7 @@ struct WriteDocument {
     bool boolean{};
     toml::date date;
     double finite{};
-    toml::inline_table<InlineSettings> inline_settings;
+    toml::InlineTable<InlineSettings> inline_settings;
     toml::local_date_time local_datetime;
     toml::time local_time;
     double not_a_number{};

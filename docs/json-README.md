@@ -13,8 +13,6 @@
     json::result<std::string> json::serialize(const T&, const json::SerializeOptions& = {});
     json::result<T> json::deserialize<T>(std::string_view, const json::ParseOptions& = {});
 
-`try_serialize`、`deserializee` 和 `deSerialize` 是与 TOML 模块匹配的兼容别名。
-
 `json::Json` 持有一份 simdjson DOM 文档，并提供类型查询、`at`/`operator[]`、标量取值和数组/对象遍历。`at` / `for_each_*` 返回的子节点是视图：在父 `Json` 或产生它的 `Parser` 仍然指向同一代文档时有效。`json::Parser` 只移不拷，复用同一份 simdjson parser 容量；下一次 `parse`（成功或失败）会使此前返回的 `Json` 的 `valid()` 变为 false。`Parser::reset` 释放该 parser 占用的容量并同样使旧文档失效。`deserialize` 使用线程局部 `Parser`，容量会涨到该线程见过的最大文档；长寿命线程可调用 `reset_thread_parser()` 回收。独立的 `json::parse` / `Json::parse` 每次分配自己的文档，互不影响。内部实现放在未导出的 `json::detail` 中。
 
 语法、类型、范围和配置的资源限制错误返回 `std::expected`，不抛异常。本库以 `-fno-exceptions` 构建，内存耗尽会终止进程，而不是变成 `expected`。
