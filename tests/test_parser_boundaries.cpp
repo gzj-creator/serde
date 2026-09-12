@@ -66,40 +66,61 @@ bool expect_error(const Result& result, std::string_view fragment,
     return false;
 }
 
-bool equal_json_nodes(const json::detail::node& left, const json::detail::node& right) {
-    if (left.value.index() != right.value.index()) return false;
-    return std::visit([&](const auto& value) {
-        using T = std::remove_cvref_t<decltype(value)>;
-        const auto& other = std::get<T>(right.value);
-        if constexpr (std::same_as<T, json::detail::node::array>) {
-            if (value.size() != other.size()) return false;
-            for (std::size_t index = 0; index < value.size(); ++index) {
-                if (!equal_json_nodes(value[index], other[index])) return false;
-            }
+bool equal_json(const json::Json& left, const json::Json& right) {
+    if (left.type() != right.type()) return false;
+    switch (left.type()) {
+        case json::ValueType::null_value:
             return true;
-        } else if constexpr (std::same_as<T, json::detail::node::object>) {
-            if (value.size() != other.size()) return false;
-            auto iterator = other.begin();
-            for (const auto& [key, child] : value) {
-                if (key != iterator->first || !equal_json_nodes(child, iterator->second)) return false;
-                ++iterator;
-            }
-            return true;
-        } else if constexpr (std::same_as<T, double>) {
-            return value == other && std::signbit(value) == std::signbit(other);
-        } else {
-            return value == other;
+        case json::ValueType::boolean:
+            return *left.as_bool() == *right.as_bool();
+        case json::ValueType::signed_integer:
+            return *left.as_int64() == *right.as_int64();
+        case json::ValueType::unsigned_integer:
+            return *left.as_uint64() == *right.as_uint64();
+        case json::ValueType::number: {
+            const auto left_value = *left.as_double();
+            const auto right_value = *right.as_double();
+            return left_value == right_value && std::signbit(left_value) == std::signbit(right_value);
         }
-    }, left.value);
+        case json::ValueType::string:
+            return *left.as_string() == *right.as_string();
+        case json::ValueType::array: {
+            if (left.size() != right.size()) return false;
+            for (std::size_t index = 0; index < left.size(); ++index) {
+                if (!equal_json(left.at(index), right.at(index))) return false;
+            }
+            return true;
+        }
+        case json::ValueType::object: {
+            std::map<std::string_view, char> seen;
+            bool equal = true;
+            left.for_each_member([&](std::string_view key, const json::Json& child) -> json::result<void> {
+                if (!seen.emplace(key, 0).second) return {};
+                const auto other = right.at(key);
+                if (!other.valid() || !equal_json(child, other)) {
+                    equal = false;
+                    return std::unexpected(std::string("mismatch"));
+                }
+                return {};
+            });
+            if (!equal) return false;
+            right.for_each_member([&](std::string_view key, const json::Json&) -> json::result<void> {
+                if (!seen.contains(key)) equal = false;
+                return {};
+            });
+            return equal;
+        }
+        default:
+            return false;
+    }
 }
 
-bool check_json_context(std::string_view text, json::detail::parser_context& context,
+bool check_json_context(std::string_view text, json::Parser& parser,
                         const json::ParseOptions& options = {}) {
-    const auto reference = json::detail::parseDocument(text, options);
-    auto agrees = [&](const auto& parsed, const json::detail::node* value) {
+    const auto reference = json::parse(text, options);
+    auto agrees = [&](const auto& parsed) {
         if (reference.has_value() != parsed.has_value() ||
-            (reference && !equal_json_nodes(*reference, *value)) ||
-            (!reference && reference.error() != parsed.error())) {
+            (reference && parsed && !equal_json(*reference, *parsed))) {
             std::println("test_parser_boundaries: JSON context mismatch for {} bytes: {} / {}",
                          text.size(), reference ? "success" : reference.error(),
                          parsed ? "success" : parsed.error());
@@ -107,19 +128,15 @@ bool check_json_context(std::string_view text, json::detail::parser_context& con
         }
         return true;
     };
-    for (const bool indexed : {false, true}) {
-        for (unsigned repeat = 0; repeat < 2; ++repeat) {
-            const auto parsed = json::detail::parseDocumentReusable(text, options, context, indexed);
-            if (!agrees(parsed, parsed ? *parsed : nullptr)) return false;
-        }
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        if (!agrees(parser.parse(text, options))) return false;
     }
-    json::detail::parser_context fresh;
-    const auto parsed = json::detail::parseDocumentIndexed(text, options, fresh);
-    return agrees(parsed, parsed ? std::addressof(*parsed) : nullptr);
+    json::Parser fresh;
+    return agrees(fresh.parse(text, options));
 }
 
 bool check_json_context_boundaries() {
-    json::detail::parser_context context;
+    json::Parser context;
     const std::vector<std::string> corpus{
         "", " \t\r\n", "null", "true", "false", "nul", "truefalse", "0x1", "1 2",
         "0", "-0.0", "1.25e-2", "-", "01", "-01", "1.", "1e+", "1e400",
@@ -221,30 +238,40 @@ int main() {
         json::deserialize<json::offset_date_time>(R"json("2024-01-01T00:00:00+24:00")json"),
         "offset", "JSON rejects an out-of-range UTC offset");
 
-    json::detail::parser_context reusable_json;
-    const auto reusable_first = json::detail::parseDocumentReusable(
-        R"json({"alpha":[1,"one"],"nested":{"value":true}})json", {}, reusable_json);
+    json::Parser reusable_json;
+    const auto reusable_first = reusable_json.parse(
+        R"json({"alpha":[1,"one"],"nested":{"value":true}})json");
     passed &= expect(reusable_first.has_value(),
-                     "JSON reusable context parses the first document");
-    const auto reusable_second = json::detail::parseDocumentReusable(
-        R"json({"beta":[2,"two"],"nested":{"other":false}})json", {}, reusable_json);
+                     "JSON reusable parser parses the first document");
+    const auto reusable_second = reusable_json.parse(
+        R"json({"beta":[2,"two"],"nested":{"other":false}})json");
     passed &= expect(reusable_second.has_value(),
-                     "JSON reusable context resets between documents");
+                     "JSON reusable parser resets between documents");
     if (reusable_second) {
-        const auto* object = std::get_if<json::detail::node::object>(
-            &(*reusable_second)->value);
-        passed &= expect(object != nullptr && object->contains("beta") &&
-                             object->contains("nested") && !object->contains("alpha"),
-                         "JSON reusable context does not retain stale object keys");
+        passed &= expect(reusable_second->contains("beta") &&
+                             reusable_second->contains("nested") &&
+                             !reusable_second->contains("alpha"),
+                         "JSON reusable parser does not retain stale object keys");
     }
-    const auto reusable_failure = json::detail::parseDocumentReusable(
-        R"json({"broken":[1,]})json", {}, reusable_json);
+    passed &= expect(reusable_first && !reusable_first->valid(),
+                     "JSON reusable parser invalidates the previous document");
+    const auto reusable_failure = reusable_json.parse(R"json({"broken":[1,]})json");
     passed &= expect(!reusable_failure,
-                     "JSON reusable context preserves parse failures");
-    const auto reusable_after_failure = json::detail::parseDocumentReusable(
-        R"json({"recovered":3})json", {}, reusable_json);
+                     "JSON reusable parser preserves parse failures");
+    passed &= expect(reusable_second && !reusable_second->valid(),
+                     "JSON reusable parser invalidates documents after a failed parse");
+    const auto reusable_after_failure = reusable_json.parse(R"json({"recovered":3})json");
     passed &= expect(reusable_after_failure.has_value(),
-                     "JSON reusable context recovers after a failed parse");
+                     "JSON reusable parser recovers after a failed parse");
+    reusable_json.reset();
+    passed &= expect(reusable_after_failure && !reusable_after_failure->valid(),
+                     "JSON Parser::reset invalidates the current document");
+    const auto reusable_after_reset = reusable_json.parse(R"json({"reset":true})json");
+    passed &= expect(reusable_after_reset.has_value() && reusable_after_reset->contains("reset"),
+                     "JSON Parser::reset can parse again");
+    json::reset_thread_parser();
+    passed &= expect(json::deserialize<int>("7").has_value(),
+                     "JSON thread-local parser reset still deserializes");
 
     json::ParseOptions json_limits;
     json_limits.max_string_bytes = long_ascii.size();

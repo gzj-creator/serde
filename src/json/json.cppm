@@ -1,7 +1,7 @@
 module;
-#if defined(__SSE2__)
-#  include <emmintrin.h>
-#endif
+#define SIMDJSON_EXCEPTIONS 0
+#define nssv_CONFIG_NO_EXCEPTIONS 1
+#include "../../third_party/simdjson/simdjson.h"
 
 export module json;
 
@@ -18,6 +18,8 @@ enum class UnknownFieldPolicy { ignore, reject };
 
 enum class NonFinitePolicy { reject, null_value };
 
+enum class DuplicateKeyPolicy { first_wins, reject };
+
 struct ParseOptions {
     std::size_t max_input_bytes = 64ULL * 1024ULL * 1024ULL;
     std::size_t max_nodes = 1000000;
@@ -27,6 +29,8 @@ struct ParseOptions {
     std::size_t max_array_items = 1000000;
     std::size_t max_object_members = 1000000;
     UnknownFieldPolicy unknown_fields = UnknownFieldPolicy::ignore;
+    DuplicateKeyPolicy duplicate_keys = DuplicateKeyPolicy::reject;
+    bool enforce_document_limits = true;
 };
 
 struct SerializeOptions {
@@ -42,6 +46,163 @@ struct SerializeOptions {
     NonFinitePolicy non_finite = NonFinitePolicy::reject;
 };
 
+enum class ValueType { invalid, null_value, boolean, signed_integer,
+                              unsigned_integer, number, string, array, object };
+
+class Parser;
+
+/// simdjson DOM 的对外包装：持有解析文档并提供只读访问接口。
+class Json {
+public:
+    Json() = default;
+
+    static result<Json> parse(std::string_view text, const ParseOptions& options = {});
+
+    bool valid() const noexcept;
+    ValueType type() const noexcept {
+        if (!valid()) return ValueType::invalid;
+        switch (element_.type()) {
+            case simdjson::dom::element_type::NULL_VALUE: return ValueType::null_value;
+            case simdjson::dom::element_type::BOOL: return ValueType::boolean;
+            case simdjson::dom::element_type::INT64: return ValueType::signed_integer;
+            case simdjson::dom::element_type::UINT64: return ValueType::unsigned_integer;
+            case simdjson::dom::element_type::DOUBLE: return ValueType::number;
+            case simdjson::dom::element_type::STRING: return ValueType::string;
+            case simdjson::dom::element_type::ARRAY: return ValueType::array;
+            case simdjson::dom::element_type::OBJECT: return ValueType::object;
+            default: return ValueType::invalid;
+        }
+    }
+    bool is_null() const noexcept { return valid() && element_.is_null(); }
+    bool is_bool() const noexcept { return valid() && element_.is_bool(); }
+    bool is_number() const noexcept {
+        return valid() && (element_.is_int64() || element_.is_uint64() || element_.is_double());
+    }
+    bool is_string() const noexcept { return valid() && element_.is_string(); }
+    bool is_array() const noexcept { return valid() && element_.is_array(); }
+    bool is_object() const noexcept { return valid() && element_.is_object(); }
+    bool contains(std::string_view key) const noexcept { return at(key).valid(); }
+    std::size_t size() const noexcept {
+        if (!valid()) return 0;
+        if (auto text = element_.get_string(); !text.error()) return text.value_unsafe().size();
+        if (auto values = element_.get_array(); !values.error()) return values.value_unsafe().size();
+        if (auto values = element_.get_object(); !values.error()) return values.value_unsafe().size();
+        return 0;
+    }
+    Json at(std::string_view key) const noexcept {
+        if (!is_object()) return {};
+        auto value = element_[key];
+        return value.error() ? Json{} : Json{state_, generation_, value.value_unsafe()};
+    }
+    Json at(std::size_t index) const noexcept {
+        if (!is_array()) return {};
+        auto value = element_.at(index);
+        return value.error() ? Json{} : Json{state_, generation_, value.value_unsafe()};
+    }
+    Json operator[](std::string_view key) const noexcept { return at(key); }
+    Json operator[](std::size_t index) const noexcept { return at(index); }
+    result<std::string_view> as_string() const {
+        if (!valid()) return std::unexpected(std::string("invalid JSON value"));
+        auto value = element_.get_string();
+        if (value.error()) return std::unexpected(std::string("JSON value is not a string"));
+        return value.value_unsafe();
+    }
+    result<bool> as_bool() const {
+        if (!valid()) return std::unexpected(std::string("invalid JSON value"));
+        auto value = element_.get_bool();
+        if (value.error()) return std::unexpected(std::string("JSON value is not a boolean"));
+        return value.value_unsafe();
+    }
+    result<std::int64_t> as_int64() const {
+        if (!valid()) return std::unexpected(std::string("invalid JSON value"));
+        auto value = element_.get_int64();
+        if (value.error()) return std::unexpected(std::string("JSON value is not an int64"));
+        return value.value_unsafe();
+    }
+    result<std::uint64_t> as_uint64() const {
+        if (!valid()) return std::unexpected(std::string("invalid JSON value"));
+        auto value = element_.get_uint64();
+        if (value.error()) return std::unexpected(std::string("JSON value is not a uint64"));
+        return value.value_unsafe();
+    }
+    result<double> as_double() const {
+        if (!valid()) return std::unexpected(std::string("invalid JSON value"));
+        auto value = element_.get_double();
+        if (value.error()) return std::unexpected(std::string("JSON value is not a number"));
+        return value.value_unsafe();
+    }
+
+    template <class Function>
+    result<void> for_each_element(Function&& function) const {
+        if (!is_array()) {
+            return std::unexpected(std::string("JSON value is not an array"));
+        }
+        auto values = element_.get_array();
+        if (values.error()) {
+            return std::unexpected(std::string("JSON value is not an array"));
+        }
+        for (const auto child : values.value_unsafe()) {
+            if (auto status = function(Json{state_, generation_, child}); !status) {
+                return status;
+            }
+        }
+        return {};
+    }
+
+    template <class Function>
+    result<void> for_each_member(Function&& function) const {
+        if (!is_object()) {
+            return std::unexpected(std::string("JSON value is not an object"));
+        }
+        auto values = element_.get_object();
+        if (values.error()) {
+            return std::unexpected(std::string("JSON value is not an object"));
+        }
+        for (const auto field : values.value_unsafe()) {
+            if (auto status = function(std::string_view(field.key),
+                                       Json{state_, generation_, field.value});
+                !status) {
+                return status;
+            }
+        }
+        return {};
+    }
+
+private:
+    struct State;
+    std::shared_ptr<State> owner_;
+    State* state_ = nullptr;
+    std::uint64_t generation_ = 0;
+    simdjson::dom::element element_{};
+    Json(std::shared_ptr<State> owner, simdjson::dom::element element);
+    Json(State* state, std::uint64_t generation, simdjson::dom::element element)
+        : state_(state), generation_(generation), element_(element) {}
+    static result<Json> parse_with_state(const std::shared_ptr<State>& state,
+                                         std::string_view text,
+                                         const ParseOptions& options);
+    friend class Parser;
+};
+
+/// 复用同一份 simdjson parser 容量；下一次 parse 或 reset 会使此前返回的 Json 失效。
+class Parser {
+public:
+    Parser() = default;
+    Parser(Parser&&) noexcept = default;
+    Parser& operator=(Parser&&) noexcept = default;
+    Parser(const Parser&) = delete;
+    Parser& operator=(const Parser&) = delete;
+    result<Json> parse(std::string_view text, const ParseOptions& options = {});
+    void reset();
+
+private:
+    std::shared_ptr<Json::State> state_;
+};
+
+inline result<Json> parse(std::string_view text, const ParseOptions& options = {}) {
+    return Json::parse(text, options);
+}
+
+void reset_thread_parser();
 // JSON 没有原生时间值。别名使项目中已验证的 TOML 时间词汇
 // 可作为 RFC 3339 JSON 字符串使用。
 using date = toml::date;
@@ -55,6 +216,7 @@ using parse_options = ParseOptions;
 using serialize_options = SerializeOptions;
 using unknown_field_policy = UnknownFieldPolicy;
 using non_finite_policy = NonFinitePolicy;
+using duplicate_key_policy = DuplicateKeyPolicy;
 
 template <class Owner, class Member>
 using field = reflect::field<Owner, Member>;
@@ -69,7 +231,9 @@ constexpr void for_each_field(T& value, Function&& function) {
     reflect::for_each_field(value, std::forward<Function>(function));
 }
 
-namespace detail {
+}  // namespace json
+
+namespace json::detail {
 
 template <class T>
 using BareT = std::remove_cvref_t<T>;
@@ -136,216 +300,6 @@ struct InlineTableTraits<inline_table<T>> {
     using value_type = T;
 };
 
-/** 检查字节字符串是否为合法的 UTF-8。 */
-inline bool valid_utf8(std::string_view text) {
-    for (std::size_t index = 0; index < text.size();) {
-#if defined(__SSE2__)
-        while (index + 16 <= text.size()) {
-            const auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(text.data() + index));
-            if (_mm_movemask_epi8(chunk) != 0) break;
-            index += 16;
-        }
-        if (index == text.size()) {
-            break;
-        }
-#endif
-        const auto byte = static_cast<unsigned char>(text[index]);
-        if (byte <= 0x7f) {
-            ++index;
-            continue;
-        }
-        std::size_t width = 0;
-        std::uint32_t code_point = 0;
-        std::uint32_t minimum = 0;
-        if (byte >= 0xc2 && byte <= 0xdf) {
-            width = 2;
-            code_point = byte & 0x1f;
-            minimum = 0x80;
-        } else if (byte >= 0xe0 && byte <= 0xef) {
-            width = 3;
-            code_point = byte & 0x0f;
-            minimum = 0x800;
-        } else if (byte >= 0xf0 && byte <= 0xf4) {
-            width = 4;
-            code_point = byte & 0x07;
-            minimum = 0x10000;
-        } else {
-            return false;
-        }
-        if (index + width > text.size()) {
-            return false;
-        }
-        for (std::size_t continuation = 1; continuation < width; ++continuation) {
-            const auto next = static_cast<unsigned char>(text[index + continuation]);
-            if ((next & 0xc0) != 0x80) {
-                return false;
-            }
-            code_point = (code_point << 6) | (next & 0x3f);
-        }
-        if (code_point < minimum || code_point > 0x10ffff ||
-            (code_point >= 0xd800 && code_point <= 0xdfff)) {
-            return false;
-        }
-        index += width;
-    }
-    return true;
-}
-
-inline result<void> append_utf8(std::string& output, std::uint32_t code_point) {
-    if (code_point > 0x10ffff ||
-        (code_point >= 0xd800 && code_point <= 0xdfff)) {
-        return std::unexpected(std::string("invalid Unicode code point in JSON string"));
-    }
-    if (code_point <= 0x7f) {
-        output.push_back(static_cast<char>(code_point));
-    } else if (code_point <= 0x7ff) {
-        output.push_back(static_cast<char>(0xc0 | (code_point >> 6)));
-        output.push_back(static_cast<char>(0x80 | (code_point & 0x3f)));
-    } else if (code_point <= 0xffff) {
-        output.push_back(static_cast<char>(0xe0 | (code_point >> 12)));
-        output.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3f)));
-        output.push_back(static_cast<char>(0x80 | (code_point & 0x3f)));
-    } else {
-        output.push_back(static_cast<char>(0xf0 | (code_point >> 18)));
-        output.push_back(static_cast<char>(0x80 | ((code_point >> 12) & 0x3f)));
-        output.push_back(static_cast<char>(0x80 | ((code_point >> 6) & 0x3f)));
-        output.push_back(static_cast<char>(0x80 | (code_point & 0x3f)));
-    }
-    return {};
-}
-
-inline bool ascii_digit(char value) {
-    return value >= '0' && value <= '9';
-}
-
-inline bool hex_digit(char value, unsigned& output) {
-    if (value >= '0' && value <= '9') {
-        output = static_cast<unsigned>(value - '0');
-        return true;
-    }
-    if (value >= 'a' && value <= 'f') {
-        output = static_cast<unsigned>(value - 'a' + 10);
-        return true;
-    }
-    if (value >= 'A' && value <= 'F') {
-        output = static_cast<unsigned>(value - 'A' + 10);
-        return true;
-    }
-    return false;
-}
-
-inline std::size_t skip_json_space(std::string_view text, std::size_t position) noexcept {
-#if defined(__SSE2__)
-    const auto* data = text.data();
-    const auto space = _mm_set1_epi8(0x20);
-    const auto tab = _mm_set1_epi8(0x09);
-    const auto newline = _mm_set1_epi8(0x0a);
-    const auto carriage = _mm_set1_epi8(0x0d);
-    while (position + 16 <= text.size()) {
-        const auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + position));
-        auto matches = _mm_cmpeq_epi8(chunk, space);
-        matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, tab));
-        matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, newline));
-        matches = _mm_or_si128(matches, _mm_cmpeq_epi8(chunk, carriage));
-        const auto mask = static_cast<unsigned>(_mm_movemask_epi8(matches));
-        if (mask == 0xffffU) {
-            position += 16;
-            continue;
-        }
-        position += static_cast<std::size_t>(std::countr_zero(mask ^ 0xffffU));
-        return position;
-    }
-#endif
-    while (position < text.size() && (text[position] == 0x20 || text[position] == 0x09 ||
-                                      text[position] == 0x0a || text[position] == 0x0d)) {
-        ++position;
-    }
-    return position;
-}
-
-inline std::size_t find_json_string_special(std::string_view text,
-                                            std::size_t position) noexcept {
-#if defined(__SSE2__)
-    const auto* data = text.data();
-    const auto quote = _mm_set1_epi8(0x22);
-    const auto slash = _mm_set1_epi8(0x5c);
-    const auto zero = _mm_setzero_si128();
-    const auto high_bit = _mm_set1_epi8(static_cast<char>(0x80));
-    const auto control_limit = _mm_set1_epi8(0x20);
-    while (position + 16 <= text.size()) {
-        const auto chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(data + position));
-        auto matches = _mm_or_si128(_mm_cmpeq_epi8(chunk, quote),
-                                    _mm_cmpeq_epi8(chunk, slash));
-        const auto ascii = _mm_cmpeq_epi8(_mm_and_si128(chunk, high_bit), zero);
-        const auto controls = _mm_and_si128(ascii, _mm_cmpgt_epi8(control_limit, chunk));
-        matches = _mm_or_si128(matches, controls);
-        const auto mask = static_cast<unsigned>(_mm_movemask_epi8(matches));
-        if (mask == 0) {
-            position += 16;
-            continue;
-        }
-        position += static_cast<std::size_t>(std::countr_zero(mask));
-        return position;
-    }
-#endif
-    while (position < text.size()) {
-        const auto character = static_cast<unsigned char>(text[position]);
-        if (character == 0x22 || character == 0x5c || character < 0x20) {
-            return position;
-        }
-        ++position;
-    }
-    return position;
-}
-
-inline std::string parse_error(std::size_t position, std::string_view message) {
-    return "JSON parse error at byte " + std::to_string(position) + ": " +
-           std::string(message);
-}
-
-// 索引语法、词素起始和字符串转义/控制字符边界。验证留在第二阶段，
-// 使格式错误的输入保持逐字节解析器的错误顺序。
-inline void buildStructuralIndexes(std::string_view text,
-                                     std::vector<std::size_t>& indexes) {
-    indexes.clear();
-    bool in_string = false;
-    bool escaped = false;
-    bool token_start = true;
-    for (std::size_t index = 0; index < text.size(); ++index) {
-        const char character = text[index];
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (character == '\\') {
-                indexes.push_back(index);
-                escaped = true;
-            } else if (character == '"') {
-                indexes.push_back(index);
-                in_string = false;
-                token_start = false;
-            } else if (static_cast<unsigned char>(character) < 0x20) {
-                indexes.push_back(index);
-            }
-            continue;
-        }
-        if (character == '"') {
-            indexes.push_back(index);
-            in_string = true;
-            token_start = false;
-        } else if (character == '[' || character == ']' || character == '{' ||
-                   character == '}' || character == ',' || character == ':') {
-            indexes.push_back(index);
-            token_start = true;
-        } else if (character == ' ' || character == '\t' || character == '\n' ||
-                   character == '\r') {
-            token_start = true;
-        } else if (token_start) {
-            indexes.push_back(index);
-            token_start = false;
-        }
-    }
-}
-
 struct Node {
     using array = std::vector<Node>;
     using object = std::map<std::string, Node>;
@@ -367,758 +321,12 @@ struct Node {
 
 using node = Node;
 
-// 补充可复用解析器基准测试的内部状态。根节点在迭代间拥有已解析的文档，
-// 以便 vector、string 和 map 存储可以回收而不改变公共类型化 API。
-struct ParserContext {
-    Node root{};
-    std::vector<std::size_t> structural_indexes;
-    std::string string_scratch;
-
-    void reset() {
-        structural_indexes.clear();
-        string_scratch.clear();
-    }
-};
-
-using parser_context = ParserContext;
-
-struct ParseContext {
-    const ParseOptions& options;
-    std::size_t nodes = 0;
-};
-
-using parse_context = ParseContext;
-
-template <bool Indexed = false>
-class BasicParser {
-public:
-    BasicParser(std::string_view text, const ParseOptions& options,
-                 ParserContext* reusable_context = nullptr,
-                 std::span<const std::size_t> indexes = {})
-        : text_(text), options_(options), context_{options},
-          reusable_context_(reusable_context), indexes_(indexes) {}
-
-    result<Node> parse() {
-        position_ = 0;
-        context_.nodes = 0;
-        index_cursor_ = 0;
-        position_ = skip_space();
-        if (position_ == text_.size()) {
-            return std::unexpected(parse_error(position_, "empty JSON input"));
-        }
-        auto value = parse_value(0);
-        if (!value) {
-            return std::unexpected(value.error());
-        }
-        position_ = skip_space();
-        if (position_ != text_.size()) {
-            return std::unexpected(parse_error(position_, "trailing characters"));
-        }
-        return value;
-    }
-
-    result<const Node*> parse_reusable() {
-        if (reusable_context_ == nullptr) {
-            return std::unexpected(std::string("JSON reusable parser context is missing"));
-        }
-        position_ = 0;
-        context_.nodes = 0;
-        index_cursor_ = 0;
-        position_ = skip_space();
-        if (position_ == text_.size()) {
-            return std::unexpected(parse_error(position_, "empty JSON input"));
-        }
-        auto value = parse_value_into(reusable_context_->root, 0);
-        if (!value) {
-            return std::unexpected(value.error());
-        }
-        position_ = skip_space();
-        if (position_ != text_.size()) {
-            return std::unexpected(parse_error(position_, "trailing characters"));
-        }
-        return std::addressof(reusable_context_->root);
-    }
-
-private:
-
-    std::size_t next_index() {
-        while (index_cursor_ < indexes_.size() && indexes_[index_cursor_] < position_) {
-            ++index_cursor_;
-        }
-        return index_cursor_ < indexes_.size() ? indexes_[index_cursor_] : text_.size();
-    }
-
-    std::size_t skip_space() {
-        if constexpr (!Indexed) {
-            return skip_json_space(text_, position_);
-        } else {
-            if (position_ == text_.size()) return position_;
-            const char character = text_[position_];
-            // Do not jump over invalid suffixes such as the 'x' in "1x".
-            if (character != ' ' && character != '\t' && character != '\n' &&
-                character != '\r') return position_;
-            return next_index();
-        }
-    }
-
-    std::size_t string_special() {
-        if constexpr (Indexed) return next_index();
-        else return find_json_string_special(text_, position_);
-    }
-
-    bool starts_with(std::string_view token) const {
-        return text_.substr(position_).starts_with(token);
-    }
-
-    result<Node> parse_value(std::size_t depth) {
-        position_ = skip_space();
-        if (position_ >= text_.size()) {
-            return std::unexpected(parse_error(position_, "missing value"));
-        }
-        if (depth >= options_.max_depth) {
-            return std::unexpected(parse_error(position_, "nesting depth exceeds configured limit"));
-        }
-        const char character = text_[position_];
-        result<Node> parsed;
-        if (character == 'n') {
-            if (!starts_with("null")) {
-                return std::unexpected(parse_error(position_, "invalid literal"));
-            }
-            position_ += 4;
-            parsed = Node{};
-        } else if (character == 't') {
-            if (!starts_with("true")) {
-                return std::unexpected(parse_error(position_, "invalid literal"));
-            }
-            position_ += 4;
-            parsed = Node{true};
-        } else if (character == 'f') {
-            if (!starts_with("false")) {
-                return std::unexpected(parse_error(position_, "invalid literal"));
-            }
-            position_ += 5;
-            parsed = Node{false};
-        } else if (character == '"') {
-            auto string = parse_string();
-            if (!string) {
-                return std::unexpected(string.error());
-            }
-            parsed = Node{std::move(*string)};
-        } else if (character == '[') {
-            parsed = parse_array(depth);
-        } else if (character == '{') {
-            parsed = parse_object(depth);
-        } else if (character == '-' || ascii_digit(character)) {
-            parsed = parse_number();
-        } else {
-            return std::unexpected(parse_error(position_, "unexpected character"));
-        }
-        if (!parsed) {
-            return std::unexpected(parsed.error());
-        }
-        if (context_.nodes >= options_.max_nodes) {
-            return std::unexpected(parse_error(position_, "node count exceeds configured limit"));
-        }
-        ++context_.nodes;
-        return parsed;
-    }
-
-    result<void> parse_value_into(Node& output, std::size_t depth) {
-        position_ = skip_space();
-        if (position_ >= text_.size()) {
-            return std::unexpected(parse_error(position_, "missing value"));
-        }
-        if (depth >= options_.max_depth) {
-            return std::unexpected(parse_error(position_, "nesting depth exceeds configured limit"));
-        }
-        const char character = text_[position_];
-        if (character == 'n') {
-            if (!starts_with("null")) {
-                return std::unexpected(parse_error(position_, "invalid literal"));
-            }
-            position_ += 4;
-            output.value = std::monostate{};
-        } else if (character == 't') {
-            if (!starts_with("true")) {
-                return std::unexpected(parse_error(position_, "invalid literal"));
-            }
-            position_ += 4;
-            output.value = true;
-        } else if (character == 'f') {
-            if (!starts_with("false")) {
-                return std::unexpected(parse_error(position_, "invalid literal"));
-            }
-            position_ += 5;
-            output.value = false;
-        } else if (character == '"') {
-            auto* string = std::get_if<std::string>(&output.value);
-            if (string == nullptr) {
-                output.value = std::string{};
-                string = std::get_if<std::string>(&output.value);
-            }
-            auto parsed = parse_string_into(*string);
-            if (!parsed) return std::unexpected(parsed.error());
-        } else if (character == '[') {
-            auto parsed = parse_array_reusable(output, depth);
-            if (!parsed) return std::unexpected(parsed.error());
-        } else if (character == '{') {
-            auto parsed = parse_object_reusable(output, depth);
-            if (!parsed) return std::unexpected(parsed.error());
-        } else if (character == '-' || ascii_digit(character)) {
-            auto parsed = parse_number();
-            if (!parsed) return std::unexpected(parsed.error());
-            output = std::move(*parsed);
-        } else {
-            return std::unexpected(parse_error(position_, "unexpected character"));
-        }
-        if (context_.nodes >= options_.max_nodes) {
-            return std::unexpected(parse_error(position_, "node count exceeds configured limit"));
-        }
-        ++context_.nodes;
-        return {};
-    }
-
-    result<void> parse_string_into(std::string& output) {
-        if (position_ >= text_.size() || text_[position_] != '"') {
-            return std::unexpected(parse_error(position_, "expected string"));
-        }
-        ++position_;
-        output.clear();
-        while (position_ < text_.size()) {
-            const auto special = string_special();
-            if (special > position_) {
-                const auto count = special - position_;
-                if (count > options_.max_string_bytes ||
-                    output.size() > options_.max_string_bytes - count) {
-                    return std::unexpected(parse_error(position_, "string exceeds configured size limit"));
-                }
-                if (output.empty()) output.reserve(count);
-                output.append(text_.data() + position_, count);
-                position_ = special;
-            }
-            if (position_ >= text_.size()) break;
-            const char character = text_[position_++];
-            if (character == '"') return {};
-            if (character == '\\') {
-                if (position_ >= text_.size()) {
-                    return std::unexpected(parse_error(position_, "unterminated escape"));
-                }
-                const char escaped = text_[position_++];
-                switch (escaped) {
-                    case '"': output.push_back('"'); break;
-                    case '\\': output.push_back('\\'); break;
-                    case '/': output.push_back('/'); break;
-                    case 'b': output.push_back('\b'); break;
-                    case 'f': output.push_back('\f'); break;
-                    case 'n': output.push_back('\n'); break;
-                    case 'r': output.push_back('\r'); break;
-                    case 't': output.push_back('\t'); break;
-                    case 'u': {
-                        std::uint32_t code_point = 0;
-                        for (unsigned index = 0; index < 4; ++index) {
-                            if (position_ >= text_.size()) {
-                                return std::unexpected(parse_error(position_, "truncated Unicode escape"));
-                            }
-                            unsigned digit = 0;
-                            if (!hex_digit(text_[position_++], digit)) {
-                                return std::unexpected(parse_error(position_ - 1, "invalid Unicode escape"));
-                            }
-                            code_point = (code_point << 4) | digit;
-                        }
-                        if (code_point >= 0xd800 && code_point <= 0xdbff) {
-                            if (position_ + 6 > text_.size() || text_[position_] != '\\' ||
-                                text_[position_ + 1] != 'u') {
-                                return std::unexpected(parse_error(position_, "unpaired high surrogate"));
-                            }
-                            position_ += 2;
-                            std::uint32_t low = 0;
-                            for (unsigned index = 0; index < 4; ++index) {
-                                unsigned digit = 0;
-                                if (position_ >= text_.size() || !hex_digit(text_[position_++], digit)) {
-                                    return std::unexpected(parse_error(position_ - 1, "invalid low surrogate"));
-                                }
-                                low = (low << 4) | digit;
-                            }
-                            if (low < 0xdc00 || low > 0xdfff) {
-                                return std::unexpected(parse_error(position_, "invalid low surrogate"));
-                            }
-                            code_point = 0x10000 + ((code_point - 0xd800) << 10) +
-                                         (low - 0xdc00);
-                        } else if (code_point >= 0xdc00 && code_point <= 0xdfff) {
-                            return std::unexpected(parse_error(position_, "unpaired low surrogate"));
-                        }
-                        auto appended = append_utf8(output, code_point);
-                        if (!appended) return std::unexpected(parse_error(position_, appended.error()));
-                        break;
-                    }
-                    default:
-                        return std::unexpected(parse_error(position_ - 1, "unsupported escape"));
-                }
-            } else if (static_cast<unsigned char>(character) < 0x20) {
-                return std::unexpected(parse_error(position_ - 1, "control character in string"));
-            } else {
-                output.push_back(character);
-            }
-            if (output.size() > options_.max_string_bytes) {
-                return std::unexpected(parse_error(position_, "string exceeds configured size limit"));
-            }
-        }
-        return std::unexpected(parse_error(position_, "unterminated string"));
-    }
-
-    result<void> parse_array_reusable(Node& output, std::size_t depth) {
-        auto* values = std::get_if<Node::array>(&output.value);
-        if (values == nullptr) {
-            output.value = Node::array{};
-            values = std::get_if<Node::array>(&output.value);
-        }
-        ++position_;
-        position_ = skip_space();
-        if (position_ < text_.size() && text_[position_] == ']') {
-            values->resize(0);
-            ++position_;
-            return {};
-        }
-        std::size_t index = 0;
-        while (true) {
-            if (index >= options_.max_array_items) {
-                return std::unexpected(parse_error(position_, "array item count exceeds configured limit"));
-            }
-            if (index < values->size()) {
-                auto parsed = parse_value_into((*values)[index], depth + 1);
-                if (!parsed) return std::unexpected(parsed.error());
-            } else {
-                values->emplace_back();
-                auto parsed = parse_value_into(values->back(), depth + 1);
-                if (!parsed) return std::unexpected(parsed.error());
-            }
-            ++index;
-            position_ = skip_space();
-            if (position_ >= text_.size()) {
-                return std::unexpected(parse_error(position_, "unterminated array"));
-            }
-            if (text_[position_] == ']') {
-                values->resize(index);
-                ++position_;
-                return {};
-            }
-            if (text_[position_] != ',') {
-                return std::unexpected(parse_error(position_, "expected ',' or ']'"));
-            }
-            ++position_;
-            position_ = skip_space();
-            if (position_ < text_.size() && text_[position_] == ']') {
-                return std::unexpected(parse_error(position_, "trailing comma in array"));
-            }
-        }
-    }
-
-    result<void> parse_object_reusable(Node& output, std::size_t depth) {
-        auto* values = std::get_if<Node::object>(&output.value);
-        if (values == nullptr) {
-            output.value = Node::object{};
-            values = std::get_if<Node::object>(&output.value);
-        }
-        // Reinsert only keys seen in this document. Unused old Nodes are
-        // destroyed on exit, and lookup remains logarithmic for wide objects.
-        Node::object previous;
-        previous.swap(*values);
-        ++position_;
-        position_ = skip_space();
-        if (position_ < text_.size() && text_[position_] == '}') {
-            ++position_;
-            return {};
-        }
-        while (true) {
-            if (values->size() >= options_.max_object_members) {
-                return std::unexpected(parse_error(position_, "object member count exceeds configured limit"));
-            }
-            if (position_ >= text_.size() || text_[position_] != '"') {
-                return std::unexpected(parse_error(position_, "object keys must be strings"));
-            }
-            reusable_context_->string_scratch.clear();
-            auto parsed_key = parse_string_into(reusable_context_->string_scratch);
-            if (!parsed_key) return std::unexpected(parsed_key.error());
-            const auto& key = reusable_context_->string_scratch;
-            if (key.size() > options_.max_key_bytes) {
-                return std::unexpected(parse_error(position_, "object key exceeds configured size limit"));
-            }
-            position_ = skip_space();
-            if (position_ >= text_.size() || text_[position_] != ':') {
-                return std::unexpected(parse_error(position_, "expected ':' after object key"));
-            }
-            ++position_;
-            if (values->find(key) != values->end()) {
-                // Match the default parser's value validation and error offset
-                // before rejecting a duplicate, including malformed values.
-                auto child = parse_value(depth + 1);
-                if (!child) return std::unexpected(child.error());
-                return std::unexpected(parse_error(position_, "duplicate object key"));
-            }
-            Node* child = nullptr;
-            auto handle = previous.extract(key);
-            if (handle) {
-                child = std::addressof(values->insert(std::move(handle)).position->second);
-            } else {
-                child = std::addressof(values->try_emplace(key).first->second);
-            }
-            // The map owns the key before recursion can overwrite scratch.
-            auto parsed = parse_value_into(*child, depth + 1);
-            if (!parsed) return std::unexpected(parsed.error());
-            position_ = skip_space();
-            if (position_ >= text_.size()) {
-                return std::unexpected(parse_error(position_, "unterminated object"));
-            }
-            if (text_[position_] == '}') {
-                ++position_;
-                return {};
-            }
-            if (text_[position_] != ',') {
-                return std::unexpected(parse_error(position_, "expected ',' or '}'"));
-            }
-            ++position_;
-            position_ = skip_space();
-            if (position_ < text_.size() && text_[position_] == '}') {
-                return std::unexpected(parse_error(position_, "trailing comma in object"));
-            }
-        }
-    }
-
-    result<std::string> parse_string() {
-        if (position_ >= text_.size() || text_[position_] != '"') {
-            return std::unexpected(parse_error(position_, "expected string"));
-        }
-        ++position_;
-        std::string output;
-        while (position_ < text_.size()) {
-            const auto special = string_special();
-            if (special > position_) {
-                const auto count = special - position_;
-                if (count > options_.max_string_bytes ||
-                    output.size() > options_.max_string_bytes - count) {
-                    return std::unexpected(parse_error(position_, "string exceeds configured size limit"));
-                }
-                if (output.empty()) {
-                    output.reserve(count);
-                }
-                output.append(text_.data() + position_, count);
-                position_ = special;
-            }
-            if (position_ >= text_.size()) {
-                break;
-            }
-            const char character = text_[position_++];
-            if (character == '"') {
-                // The complete JSON input is validated before parsing. Raw bytes
-                // are therefore valid UTF-8; escapes are validated by append_utf8.
-                return output;
-            }
-            if (character == '\\') {
-                if (position_ >= text_.size()) {
-                    return std::unexpected(parse_error(position_, "unterminated escape"));
-                }
-                const char escaped = text_[position_++];
-                switch (escaped) {
-                    case '"': output.push_back('"'); break;
-                    case '\\': output.push_back('\\'); break;
-                    case '/': output.push_back('/'); break;
-                    case 'b': output.push_back('\b'); break;
-                    case 'f': output.push_back('\f'); break;
-                    case 'n': output.push_back('\n'); break;
-                    case 'r': output.push_back('\r'); break;
-                    case 't': output.push_back('\t'); break;
-                    case 'u': {
-                        std::uint32_t code_point = 0;
-                        for (unsigned index = 0; index < 4; ++index) {
-                            if (position_ >= text_.size()) {
-                                return std::unexpected(parse_error(position_, "truncated Unicode escape"));
-                            }
-                            unsigned digit = 0;
-                            if (!hex_digit(text_[position_++], digit)) {
-                                return std::unexpected(parse_error(position_ - 1, "invalid Unicode escape"));
-                            }
-                            code_point = (code_point << 4) | digit;
-                        }
-                        if (code_point >= 0xd800 && code_point <= 0xdbff) {
-                            if (position_ + 6 > text_.size() || text_[position_] != '\\' ||
-                                text_[position_ + 1] != 'u') {
-                                return std::unexpected(parse_error(position_, "unpaired high surrogate"));
-                            }
-                            position_ += 2;
-                            std::uint32_t low = 0;
-                            for (unsigned index = 0; index < 4; ++index) {
-                                unsigned digit = 0;
-                                if (position_ >= text_.size() || !hex_digit(text_[position_++], digit)) {
-                                    return std::unexpected(parse_error(position_ - 1, "invalid low surrogate"));
-                                }
-                                low = (low << 4) | digit;
-                            }
-                            if (low < 0xdc00 || low > 0xdfff) {
-                                return std::unexpected(parse_error(position_, "invalid low surrogate"));
-                            }
-                            code_point = 0x10000 + ((code_point - 0xd800) << 10) +
-                                         (low - 0xdc00);
-                        } else if (code_point >= 0xdc00 && code_point <= 0xdfff) {
-                            return std::unexpected(parse_error(position_, "unpaired low surrogate"));
-                        }
-                        auto appended = append_utf8(output, code_point);
-                        if (!appended) {
-                            return std::unexpected(parse_error(position_, appended.error()));
-                        }
-                        break;
-                    }
-                    default:
-                        return std::unexpected(parse_error(position_ - 1, "unsupported escape"));
-                }
-            } else if (static_cast<unsigned char>(character) < 0x20) {
-                return std::unexpected(parse_error(position_ - 1, "control character in string"));
-            } else {
-                output.push_back(character);
-            }
-            if (output.size() > options_.max_string_bytes) {
-                return std::unexpected(parse_error(position_, "string exceeds configured size limit"));
-            }
-        }
-        return std::unexpected(parse_error(position_, "unterminated string"));
-    }
-
-    result<Node> parse_number() {
-        const std::size_t start = position_;
-        if (text_[position_] == '-') {
-            ++position_;
-            if (position_ >= text_.size()) {
-                return std::unexpected(parse_error(position_, "incomplete number"));
-            }
-        }
-        if (text_[position_] == '0') {
-            ++position_;
-            if (position_ < text_.size() && ascii_digit(text_[position_])) {
-                return std::unexpected(parse_error(position_, "leading zero in number"));
-            }
-        } else if (text_[position_] >= '1' && text_[position_] <= '9') {
-            while (position_ < text_.size() && ascii_digit(text_[position_])) {
-                ++position_;
-            }
-        } else {
-            return std::unexpected(parse_error(position_, "invalid number"));
-        }
-
-        bool floating = false;
-        if (position_ < text_.size() && text_[position_] == '.') {
-            floating = true;
-            ++position_;
-            const auto fraction_start = position_;
-            while (position_ < text_.size() && ascii_digit(text_[position_])) {
-                ++position_;
-            }
-            if (position_ == fraction_start) {
-                return std::unexpected(parse_error(position_, "fraction has no digits"));
-            }
-        }
-        if (position_ < text_.size() && (text_[position_] == 'e' || text_[position_] == 'E')) {
-            floating = true;
-            ++position_;
-            if (position_ < text_.size() &&
-                (text_[position_] == '+' || text_[position_] == '-')) {
-                ++position_;
-            }
-            const auto exponent_start = position_;
-            while (position_ < text_.size() && ascii_digit(text_[position_])) {
-                ++position_;
-            }
-            if (position_ == exponent_start) {
-                return std::unexpected(parse_error(position_, "exponent has no digits"));
-            }
-        }
-
-        const auto lexeme = text_.substr(start, position_ - start);
-        if (floating) {
-            double value = 0.0;
-            const auto [end, error] = std::from_chars(
-                lexeme.data(), lexeme.data() + lexeme.size(), value,
-                std::chars_format::general);
-            if (error != std::errc{} || end != lexeme.data() + lexeme.size() ||
-                !std::isfinite(value)) {
-                return std::unexpected(parse_error(start, "number is outside the finite range"));
-            }
-            return Node{value};
-        }
-
-        const bool negative = !lexeme.empty() && lexeme.front() == '-';
-        const auto digits = negative ? lexeme.substr(1) : lexeme;
-        std::uint64_t magnitude = 0;
-        const auto [end, error] = std::from_chars(
-            digits.data(), digits.data() + digits.size(), magnitude, 10);
-        if (error != std::errc{} || end != digits.data() + digits.size()) {
-            return std::unexpected(parse_error(start, "integer is outside the 64-bit range"));
-        }
-        constexpr auto positive_limit =
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-        constexpr auto negative_limit = positive_limit + 1;
-        if (negative) {
-            if (magnitude > negative_limit) {
-                return std::unexpected(parse_error(start, "integer is outside the 64-bit range"));
-            }
-            if (magnitude == negative_limit) {
-                return Node{std::numeric_limits<std::int64_t>::min()};
-            }
-            return Node{-static_cast<std::int64_t>(magnitude)};
-        }
-        if (magnitude <= positive_limit) {
-            return Node{static_cast<std::int64_t>(magnitude)};
-        }
-        return Node{magnitude};
-    }
-
-    result<Node> parse_array(std::size_t depth) {
-        ++position_;
-        Node::array values;
-        position_ = skip_space();
-        if (position_ < text_.size() && text_[position_] == ']') {
-            ++position_;
-            return Node{std::move(values)};
-        }
-        while (true) {
-            if (values.size() >= options_.max_array_items) {
-                return std::unexpected(parse_error(position_, "array item count exceeds configured limit"));
-            }
-            auto value = parse_value(depth + 1);
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            values.push_back(std::move(*value));
-            position_ = skip_space();
-            if (position_ >= text_.size()) {
-                return std::unexpected(parse_error(position_, "unterminated array"));
-            }
-            if (text_[position_] == ']') {
-                ++position_;
-                return Node{std::move(values)};
-            }
-            if (text_[position_] != ',') {
-                return std::unexpected(parse_error(position_, "expected ',' or ']'"));
-            }
-            ++position_;
-            position_ = skip_space();
-            if (position_ < text_.size() && text_[position_] == ']') {
-                return std::unexpected(parse_error(position_, "trailing comma in array"));
-            }
-        }
-    }
-
-    result<Node> parse_object(std::size_t depth) {
-        ++position_;
-        Node::object values;
-        position_ = skip_space();
-        if (position_ < text_.size() && text_[position_] == '}') {
-            ++position_;
-            return Node{std::move(values)};
-        }
-        while (true) {
-            if (values.size() >= options_.max_object_members) {
-                return std::unexpected(parse_error(position_, "object member count exceeds configured limit"));
-            }
-            if (position_ >= text_.size() || text_[position_] != '"') {
-                return std::unexpected(parse_error(position_, "object keys must be strings"));
-            }
-            auto key = parse_string();
-            if (!key) {
-                return std::unexpected(key.error());
-            }
-            if (key->size() > options_.max_key_bytes) {
-                return std::unexpected(parse_error(position_, "object key exceeds configured size limit"));
-            }
-            position_ = skip_space();
-            if (position_ >= text_.size() || text_[position_] != ':') {
-                return std::unexpected(parse_error(position_, "expected ':' after object key"));
-            }
-            ++position_;
-            auto value = parse_value(depth + 1);
-            if (!value) {
-                return std::unexpected(value.error());
-            }
-            if (!values.emplace(std::move(*key), std::move(*value)).second) {
-                return std::unexpected(parse_error(position_, "duplicate object key"));
-            }
-            position_ = skip_space();
-            if (position_ >= text_.size()) {
-                return std::unexpected(parse_error(position_, "unterminated object"));
-            }
-            if (text_[position_] == '}') {
-                ++position_;
-                return Node{std::move(values)};
-            }
-            if (text_[position_] != ',') {
-                return std::unexpected(parse_error(position_, "expected ',' or '}'"));
-            }
-            ++position_;
-            position_ = skip_space();
-            if (position_ < text_.size() && text_[position_] == '}') {
-                return std::unexpected(parse_error(position_, "trailing comma in object"));
-            }
-        }
-    }
-
-    std::string_view text_;
-    const ParseOptions& options_;
-    ParseContext context_;
-    ParserContext* reusable_context_ = nullptr;
-    std::span<const std::size_t> indexes_;
-    std::size_t index_cursor_ = 0;
-    std::size_t position_ = 0;
-};
-
-using Parser = BasicParser<>;
-
-// 返回的节点属于 context，会在下一次解析时失效，包括失败的解析。
-// 保留的容量是文档存储，而非缓存。
-inline result<const Node*> parseDocumentReusable(std::string_view text,
-                                                   const ParseOptions& options,
-                                                   ParserContext& context,
-                                                   bool indexed = false) {
-    context.reset();
-    if (text.size() > options.max_input_bytes) {
-        return std::unexpected(std::string("JSON input exceeds configured size limit"));
-    }
-    if (!valid_utf8(text)) {
-        return std::unexpected(std::string("JSON input is not valid UTF-8"));
-    }
-    if (indexed) {
-        buildStructuralIndexes(text, context.structural_indexes);
-        BasicParser<true> document_parser{text, options, std::addressof(context),
-                                           context.structural_indexes};
-        return document_parser.parse_reusable();
-    } else {
-        Parser document_parser{text, options, std::addressof(context)};
-        return document_parser.parse_reusable();
-    }
+inline bool ascii_digit(char value) {
+    return value >= '0' && value <= '9';
 }
 
-inline result<Node> parseDocumentIndexed(std::string_view text,
-                                          const ParseOptions& options,
-                                          ParserContext& context) {
-    context.reset();
-    if (text.size() > options.max_input_bytes) {
-        return std::unexpected(std::string("JSON input exceeds configured size limit"));
-    }
-    if (!valid_utf8(text)) {
-        return std::unexpected(std::string("JSON input is not valid UTF-8"));
-    }
-    buildStructuralIndexes(text, context.structural_indexes);
-    BasicParser<true> document_parser{text, options, nullptr, context.structural_indexes};
-    return document_parser.parse();
-}
-
-// 保持公共类型化 API 和基准测试的仅解析阶段在相同的验证和 DOM 构建路径上。
-inline result<Node> parseDocument(std::string_view text, const ParseOptions& options) {
-    if (text.size() > options.max_input_bytes) {
-        return std::unexpected(std::string("JSON input exceeds configured size limit"));
-    }
-    if (!valid_utf8(text)) {
-        return std::unexpected(std::string("JSON input is not valid UTF-8"));
-    }
-    Parser document_parser{text, options};
-    return document_parser.parse();
+inline bool valid_utf8(std::string_view text) {
+    return simdjson::validate_utf8(text);
 }
 
 inline bool valid_date_value(const date& value) {
@@ -1632,8 +840,12 @@ inline bool appendValue(const Node& value, Writer& output,
 }
 
 template <class T>
-result<T> decodeValue(const Node& input, std::string_view path,
+result<T> decodeValue(const Json& input, std::string_view path,
                         const ParseOptions& options);
+
+inline std::string rebaseDecodeError(std::string error, std::string_view path);
+inline std::string indexedDecodePath(std::string_view path, std::size_t index);
+inline std::string memberDecodePath(std::string_view path, std::string_view member);
 
 inline std::string valuePath(std::string_view path) {
     return path.empty() ? std::string("value") : std::string(path);
@@ -1673,13 +885,13 @@ inline std::string memberDecodePath(std::string_view path, std::string_view memb
 }
 
 template <class T>
-result<T> decodeValue(const Node& input, std::string_view path,
+result<T> decodeValue(const Json& input, std::string_view path,
                         const ParseOptions& options) {
     using U = BareT<T>;
     const auto where = valuePath(path);
 
     if constexpr (OptionalTraits<U>::value) {
-        if (std::holds_alternative<std::monostate>(input.value)) {
+        if (input.is_null()) {
             return U{};
         }
         auto decoded = decodeValue<typename OptionalTraits<U>::value_type>(input, path, options);
@@ -1690,47 +902,49 @@ result<T> decodeValue(const Node& input, std::string_view path,
         if (!decoded) return std::unexpected(decoded.error());
         return U{std::move(*decoded)};
     } else if constexpr (std::same_as<U, std::nullptr_t>) {
-        if (std::holds_alternative<std::monostate>(input.value)) return nullptr;
+        if (input.is_null()) return nullptr;
         return std::unexpected(where + " must be JSON null");
     } else if constexpr (std::same_as<U, date>) {
-        const auto* value = std::get_if<std::string>(&input.value);
-        if (value == nullptr) return std::unexpected(where + " must be a JSON date string");
+        auto value = input.as_string();
+        if (!value) return std::unexpected(where + " must be a JSON date string");
         auto parsed = parse_date_text(*value);
         if (!parsed) return std::unexpected(where + ": " + parsed.error());
         return *parsed;
     } else if constexpr (std::same_as<U, time>) {
-        const auto* value = std::get_if<std::string>(&input.value);
-        if (value == nullptr) return std::unexpected(where + " must be a JSON time string");
+        auto value = input.as_string();
+        if (!value) return std::unexpected(where + " must be a JSON time string");
         auto parsed = parse_time_prefix(*value);
         if (!parsed || parsed->second != value->size()) {
             return std::unexpected(where + ": invalid JSON time");
         }
         return parsed->first;
     } else if constexpr (std::same_as<U, local_date_time>) {
-        const auto* value = std::get_if<std::string>(&input.value);
-        if (value == nullptr) return std::unexpected(where + " must be a JSON local date-time string");
+        auto value = input.as_string();
+        if (!value) return std::unexpected(where + " must be a JSON local date-time string");
         auto parsed = parse_local_date_time_text(*value);
         if (!parsed) return std::unexpected(where + ": " + parsed.error());
         return *parsed;
     } else if constexpr (std::same_as<U, offset_date_time>) {
-        const auto* value = std::get_if<std::string>(&input.value);
-        if (value == nullptr) return std::unexpected(where + " must be a JSON offset date-time string");
+        auto value = input.as_string();
+        if (!value) return std::unexpected(where + " must be a JSON offset date-time string");
         auto parsed = parse_offset_date_time_text(*value);
         if (!parsed) return std::unexpected(where + ": " + parsed.error());
         return *parsed;
     } else if constexpr (std::same_as<U, std::string>) {
-        if (const auto* value = std::get_if<std::string>(&input.value)) return *value;
-        return std::unexpected(where + " must be a JSON string");
+        auto value = input.as_string();
+        if (!value) return std::unexpected(where + " must be a JSON string");
+        return std::string(*value);
     } else if constexpr (std::same_as<U, bool>) {
-        if (const auto* value = std::get_if<bool>(&input.value)) return *value;
-        return std::unexpected(where + " must be a JSON boolean");
+        auto value = input.as_bool();
+        if (!value) return std::unexpected(where + " must be a JSON boolean");
+        return *value;
     } else if constexpr (std::is_integral_v<U>) {
         std::int64_t signed_value = 0;
         std::uint64_t unsigned_value = 0;
         bool is_unsigned_value = false;
-        if (const auto* value = std::get_if<std::int64_t>(&input.value)) {
+        if (auto value = input.as_int64(); value) {
             signed_value = *value;
-        } else if (const auto* value = std::get_if<std::uint64_t>(&input.value)) {
+        } else if (auto value = input.as_uint64(); value) {
             unsigned_value = *value;
             is_unsigned_value = true;
         } else {
@@ -1772,9 +986,9 @@ result<T> decodeValue(const Node& input, std::string_view path,
         }
     } else if constexpr (std::is_floating_point_v<U>) {
         double value = 0.0;
-        if (const auto* item = std::get_if<double>(&input.value)) value = *item;
-        else if (const auto* item = std::get_if<std::int64_t>(&input.value)) value = static_cast<double>(*item);
-        else if (const auto* item = std::get_if<std::uint64_t>(&input.value)) value = static_cast<double>(*item);
+        if (auto item = input.as_double(); item) value = *item;
+        else if (auto item = input.as_int64(); item) value = static_cast<double>(*item);
+        else if (auto item = input.as_uint64(); item) value = static_cast<double>(*item);
         else return std::unexpected(where + " must be a JSON number");
         const U converted = static_cast<U>(value);
         if (!std::isfinite(static_cast<double>(converted))) {
@@ -1787,53 +1001,59 @@ result<T> decodeValue(const Node& input, std::string_view path,
         if (!decoded) return std::unexpected(decoded.error());
         return static_cast<U>(*decoded);
     } else if constexpr (VectorTraits<U>::value) {
-        const auto* values = std::get_if<Node::array>(&input.value);
-        if (values == nullptr) return std::unexpected(where + " must be a JSON array");
+        if (!input.is_array()) return std::unexpected(where + " must be a JSON array");
         U output;
-        if constexpr (requires { output.reserve(values->size()); }) output.reserve(values->size());
-        for (std::size_t index = 0; index < values->size(); ++index) {
-            auto decoded = decodeValue<typename VectorTraits<U>::value_type>(
-                (*values)[index], {}, options);
+        if constexpr (requires { output.reserve(input.size()); }) output.reserve(input.size());
+        std::size_t index = 0;
+        std::string failure;
+        const auto walked = input.for_each_element([&](const Json& child) -> result<void> {
+            auto decoded = decodeValue<typename VectorTraits<U>::value_type>(child, {}, options);
             if (!decoded) {
-                return std::unexpected(rebaseDecodeError(
-                    decoded.error(), indexedDecodePath(where, index)));
+                failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where, index));
+                return std::unexpected(failure);
             }
             output.push_back(std::move(*decoded));
-        }
+            ++index;
+            return {};
+        });
+        if (!walked) return std::unexpected(std::move(failure));
         return output;
     } else if constexpr (ArrayTraits<U>::value) {
-        const auto* values = std::get_if<Node::array>(&input.value);
-        if (values == nullptr || values->size() != ArrayTraits<U>::size) {
+        if (!input.is_array() || input.size() != ArrayTraits<U>::size) {
             return std::unexpected(where + " has the wrong JSON array size");
         }
         U output{};
-        for (std::size_t index = 0; index < values->size(); ++index) {
-            auto decoded = decodeValue<typename ArrayTraits<U>::value_type>(
-                (*values)[index], {}, options);
+        std::size_t index = 0;
+        std::string failure;
+        const auto walked = input.for_each_element([&](const Json& child) -> result<void> {
+            auto decoded = decodeValue<typename ArrayTraits<U>::value_type>(child, {}, options);
             if (!decoded) {
-                return std::unexpected(rebaseDecodeError(
-                    decoded.error(), indexedDecodePath(where, index)));
+                failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where, index));
+                return std::unexpected(failure);
             }
             output[index] = std::move(*decoded);
-        }
+            ++index;
+            return {};
+        });
+        if (!walked) return std::unexpected(std::move(failure));
         return output;
     } else if constexpr (MapTraits<U>::value) {
-        const auto* values = std::get_if<Node::object>(&input.value);
-        if (values == nullptr) return std::unexpected(where + " must be a JSON object");
+        if (!input.is_object()) return std::unexpected(where + " must be a JSON object");
         U output;
-        for (const auto& [key, value] : *values) {
-            auto decoded = decodeValue<typename MapTraits<U>::mapped_type>(
-                value, {}, options);
+        std::string failure;
+        const auto walked = input.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
+            auto decoded = decodeValue<typename MapTraits<U>::mapped_type>(child, {}, options);
             if (!decoded) {
-                return std::unexpected(rebaseDecodeError(
-                    decoded.error(), memberDecodePath(where, key)));
+                failure = rebaseDecodeError(decoded.error(), memberDecodePath(where, key));
+                return std::unexpected(failure);
             }
-            output.emplace(key, std::move(*decoded));
-        }
+            output.emplace(std::string(key), std::move(*decoded));
+            return {};
+        });
+        if (!walked) return std::unexpected(std::move(failure));
         return output;
     } else if constexpr (Reflectable<U>) {
-        const auto* values = std::get_if<Node::object>(&input.value);
-        if (values == nullptr) return std::unexpected(where + " must be a JSON object");
+        if (!input.is_object()) return std::unexpected(where + " must be a JSON object");
         if constexpr (!std::is_default_constructible_v<U>) {
             return std::unexpected(where + " is not default constructible");
         } else {
@@ -1848,15 +1068,14 @@ result<T> decodeValue(const Node& input, std::string_view path,
                     failure = where + " field '" + std::string(descriptor.name) + "' is not assignable";
                     return;
                 }
-                const auto iterator = values->find(std::string(descriptor.name));
-                if (iterator == values->end()) {
+                const auto member = input.at(descriptor.name);
+                if (!member.valid()) {
                     if constexpr (OptionalTraits<Member>::value) return;
                     failed = true;
                     failure = where + " is missing field '" + std::string(descriptor.name) + "'";
                     return;
                 }
-                auto decoded = decodeValue<Member>(
-                    iterator->second, {}, options);
+                auto decoded = decodeValue<Member>(member, {}, options);
                 if (!decoded) {
                     failed = true;
                     failure = rebaseDecodeError(
@@ -1866,18 +1085,19 @@ result<T> decodeValue(const Node& input, std::string_view path,
                 descriptor.get(object) = std::move(*decoded);
             });
             if (!failed && options.unknown_fields == UnknownFieldPolicy::reject) {
-                for (const auto& [key, ignored] : *values) {
+                const auto walked = input.for_each_member([&](std::string_view key, const Json&) -> result<void> {
                     bool known = false;
                     std::apply([&](const auto&... descriptor) {
                         known = ((key == descriptor.name) || ...);
                     }, reflect::fields(output));
-                    static_cast<void>(ignored);
                     if (!known) {
                         failed = true;
-                        failure = where + " contains unknown field '" + key + "'";
-                        break;
+                        failure = where + " contains unknown field '" + std::string(key) + "'";
+                        return std::unexpected(failure);
                     }
-                }
+                    return {};
+                });
+                static_cast<void>(walked);
             }
             if (failed) return std::unexpected(std::move(failure));
             return output;
@@ -1887,51 +1107,183 @@ result<T> decodeValue(const Node& input, std::string_view path,
     }
 }
 
-}  // namespace detail
+
+inline std::string parse_error(simdjson::error_code error) {
+    switch (error) {
+        case simdjson::UNESCAPED_CHARS:
+            return "JSON parse error: unescaped control character in string";
+        case simdjson::UTF8_ERROR:
+            return "JSON parse error: input is not valid UTF-8";
+        case simdjson::NUMBER_ERROR:
+            return "JSON parse error: invalid number fraction or exponent";
+        case simdjson::NUMBER_OUT_OF_RANGE:
+            return "JSON parse error: number is outside the finite range";
+        case simdjson::STRING_ERROR:
+            return "JSON parse error: invalid string or unpaired low surrogate";
+        case simdjson::DEPTH_ERROR:
+            return "JSON parse error: nesting depth exceeds configured limit";
+        default:
+            return std::string("JSON parse error: ") + simdjson::error_message(error);
+    }
+}
+
+inline bool needs_document_walk(const ParseOptions& options) noexcept {
+    return options.enforce_document_limits ||
+           options.duplicate_keys == DuplicateKeyPolicy::reject;
+}
+
+inline result<void> enforce_limits(const Json& value, const ParseOptions& options,
+                                   std::size_t depth, std::size_t& nodes) {
+    if (options.enforce_document_limits) {
+        if (depth >= options.max_depth) {
+            return std::unexpected(std::string("JSON parse error: nesting depth exceeds configured limit"));
+        }
+        if (nodes++ >= options.max_nodes) {
+            return std::unexpected(std::string("JSON parse error: node count exceeds configured limit"));
+        }
+    }
+    if (value.is_string()) {
+        auto text = value.as_string();
+        if (!text) return std::unexpected(text.error());
+        if (options.enforce_document_limits && text->size() > options.max_string_bytes) {
+            return std::unexpected(std::string("JSON string exceeds configured size limit"));
+        }
+        return {};
+    }
+    if (value.is_array()) {
+        if (options.enforce_document_limits && value.size() > options.max_array_items) {
+            return std::unexpected(std::string("JSON array item count exceeds configured limit"));
+        }
+        return value.for_each_element([&](const Json& child) {
+            return enforce_limits(child, options, depth + 1, nodes);
+        });
+    }
+    if (value.is_object()) {
+        if (options.enforce_document_limits && value.size() > options.max_object_members) {
+            return std::unexpected(std::string("JSON object member count exceeds configured limit"));
+        }
+        std::map<std::string_view, std::size_t> seen;
+        return value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
+            if (options.enforce_document_limits && key.size() > options.max_key_bytes) {
+                return std::unexpected(std::string("JSON object key exceeds configured size limit"));
+            }
+            if (options.duplicate_keys == DuplicateKeyPolicy::reject &&
+                !seen.emplace(key, 0).second) {
+                return std::unexpected(std::string("JSON parse error: duplicate object key"));
+            }
+            return enforce_limits(child, options, depth + 1, nodes);
+        });
+    }
+    return {};
+}
+
+inline Parser& thread_parser() {
+    thread_local Parser parser;
+    return parser;
+}
+
+}  // namespace json::detail
+
+export namespace json {
+
+struct Json::State {
+    simdjson::dom::parser parser;
+    std::uint64_t generation = 0;
+};
+
+bool Json::valid() const noexcept {
+    return state_ != nullptr && generation_ == state_->generation;
+}
+
+Json::Json(std::shared_ptr<State> owner, simdjson::dom::element element)
+    : owner_(std::move(owner)), state_(owner_.get()),
+      generation_(state_ ? state_->generation : 0), element_(element) {}
+
+result<Json> Json::parse_with_state(const std::shared_ptr<State>& state,
+                                    std::string_view text,
+                                    const ParseOptions& options) {
+    if (text.size() > options.max_input_bytes) {
+        return std::unexpected(std::string("JSON input exceeds configured size limit"));
+    }
+
+    ++state->generation;
+    const auto depth = std::max<std::size_t>(options.max_depth, 1);
+    const auto needed = std::max<std::size_t>(text.size(), 32);
+    if (state->parser.capacity() < needed || state->parser.max_depth() < depth) {
+        if (auto allocation = state->parser.allocate(needed, depth)) {
+            return std::unexpected(detail::parse_error(allocation));
+        }
+    }
+
+    auto parsed = state->parser.parse(text.data(), text.size(), true);
+    if (parsed.error()) {
+        return std::unexpected(detail::parse_error(parsed.error()));
+    }
+    Json value{state, parsed.value_unsafe()};
+    if (detail::needs_document_walk(options)) {
+        std::size_t nodes = 0;
+        if (auto limits = detail::enforce_limits(value, options, 0, nodes); !limits) {
+            return std::unexpected(limits.error());
+        }
+    }
+    return value;
+}
+
+result<Json> Json::parse(std::string_view text, const ParseOptions& options) {
+    return parse_with_state(std::make_shared<State>(), text, options);
+}
+
+result<Json> Parser::parse(std::string_view text, const ParseOptions& options) {
+    if (!state_) {
+        state_ = std::make_shared<Json::State>();
+    }
+    return Json::parse_with_state(state_, text, options);
+}
+
+void Parser::reset() {
+    if (!state_) {
+        return;
+    }
+    ++state_->generation;
+    state_.reset();
+}
+
+void reset_thread_parser() {
+    detail::thread_parser().reset();
+}
 
 template <class T>
 result<std::string> serialize(const T& value, const SerializeOptions& options = {}) {
-    try {
-        if (options.indent_width > 64) {
-            return std::unexpected(std::string("JSON indent width exceeds configured limit"));
-        }
-        detail::EncodeContext context{options};
-        auto encoded = detail::encodeValue(value, context, 0);
-        if (!encoded) return std::unexpected(encoded.error());
-        detail::Writer output{{}, options.max_output_bytes};
-        std::string failure;
-        if (!detail::appendValue(*encoded, output, options, 0, failure)) {
-            if (!failure.empty()) return std::unexpected(std::move(failure));
-            return std::unexpected(std::string("JSON output exceeds configured size limit"));
-        }
-        return std::move(output.output);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(std::string("JSON operation exhausted memory"));
-    } catch (const std::exception& error) {
-        return std::unexpected(std::string("JSON operation failed: ") + error.what());
-    } catch (...) {
-        return std::unexpected(std::string("JSON operation failed with an unknown exception"));
+    if (options.indent_width > 64) {
+        return std::unexpected(std::string("JSON indent width exceeds configured limit"));
     }
+    detail::EncodeContext context{options};
+    auto encoded = detail::encodeValue(value, context, 0);
+    if (!encoded) return std::unexpected(encoded.error());
+    detail::Writer output{{}, options.max_output_bytes};
+    std::string failure;
+    if (!detail::appendValue(*encoded, output, options, 0, failure)) {
+        if (!failure.empty()) return std::unexpected(std::move(failure));
+        return std::unexpected(std::string("JSON output exceeds configured size limit"));
+    }
+    return std::move(output.output);
+}
+
+template <class T>
+result<T> decode(const Json& value, const ParseOptions& options = {}) {
+    return detail::decodeValue<T>(value, {}, options);
+}
+
+template <class T>
+result<T> deserialize(std::string_view text, const ParseOptions& options = {}) {
+    auto parsed = detail::thread_parser().parse(text, options);
+    if (!parsed) return std::unexpected(parsed.error());
+    return decode<T>(*parsed, options);
 }
 
 template <class T>
 result<std::string> try_serialize(const T& value, const SerializeOptions& options = {}) {
     return serialize(value, options);
-}
-
-template <class T>
-result<T> deserialize(std::string_view text, const ParseOptions& options = {}) {
-    try {
-        auto parsed = detail::parseDocument(text, options);
-        if (!parsed) return std::unexpected(parsed.error());
-        return detail::decodeValue<T>(*parsed, {}, options);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(std::string("JSON operation exhausted memory"));
-    } catch (const std::exception& error) {
-        return std::unexpected(std::string("JSON operation failed: ") + error.what());
-    } catch (...) {
-        return std::unexpected(std::string("JSON operation failed with an unknown exception"));
-    }
 }
 
 template <class T>

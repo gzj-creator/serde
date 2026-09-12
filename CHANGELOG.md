@@ -14,21 +14,26 @@
 ### 新增
 
 - 抽出可复用的 `reflect` module 与 `REFLECT_*` 宏，TOML 和后续 JSON 等序列化器共享同一字段描述符。
-- 增加无第三方依赖的 `json` module，复用反射字段描述，提供严格 RFC 8259 解析、确定性序列化、资源限制和完整测试。
+- 增加 `json` module，复用反射字段描述，提供 RFC 8259 编解码、资源限制和测试；解析后端为内置 simdjson。
 - 移除 TOML 专用 `toml_reflect.hpp` 和 `TOML_REFLECT_*` 兼容入口，统一使用通用反射接口。
 - 增加嵌套数组表、严格数字词法、重复表定义、内联表重开、UTF-8/控制字符和 GCC 16.1 静态反射探针测试。
 - 新增基准测试套件，对比 serde 与 simdjson 4.6.9、toml++ 3.4.0 的性能表现。
 - 新增 JSON 解析器边界回归测试与 TOML 解析器边界回归测试。
+- 新增 `json::Parser::reset` 与 `json::reset_thread_parser()`，用于释放复用 parser 的容量并作废旧文档。
 - 新增项目级 README.md 与 docs/ 文档目录（含 json、reflect、toml 模块说明）。
 
 ### 修复
 
 - 加强 TOML 日期时间、字符串、键、数组和表状态校验，拒绝超出规范的词法与结构输入。
+- JSON 解析不再手写越过 `std::string::size()` 的 padding，改由 simdjson 拷贝输入；`Parser` 再次解析或 `reset` 后旧 `Json` 会失效。
 
 ### 变更
 
 - 将 `reflect` 模块中的 concept 和函数重命名为 PascalCase（`hasReflectFields`、`Reflectable`、`getFields`），保持与 C++ 标准库命名风格一致。
 - 将 `toml` 模块中的枚举、结构体和 concept 重命名为 PascalCase（`UnknownFieldPolicy`、`ParseOptions`、`SerializeOptions`、`InlineTable`、`Reflectable`），同时保留旧名称的 type alias 以维持向后兼容。
+- JSON 解析改为 `json::Json` 包装 simdjson DOM；`ParseOptions` 以独立的 `duplicate_keys` 与 `enforce_document_limits` 控制重复键和文档上限。
+- 库以 `-fno-exceptions` 构建；JSON/TOML 不再把内存耗尽转成 `expected`，TOML 编解码去掉已失效的 try/catch。
+- `json::detail` 不再随模块导出，对外只保留公开 API。
 - 为 JSON/TOML 的空白符、字符串和 ASCII UTF-8 扫描增加 SSE2 快速路径。
 - 删除 `probes/gcc_reflection.cpp`、`src/reflect/README.md`、`src/toml/README.md` 等不再使用的文件。
 
@@ -41,5 +46,6 @@
 ### 维护
 
 - 将 `mcpp.toml` 中的包名从 `demo` 修正为 `serde`，使包元数据与项目名称保持一致。
-- 移除未被其他目标使用的 `demo.common` 示例模块，并将应用入口精简为无业务逻辑的最小程序。
+- 移除未被其他目标使用的 `demo.common` 示例模块和应用入口 `src/main.cpp`，包以静态库形式交付。
+- 默认构建 profile 改回 debug；release 留给基准测试。
 - 忽略编辑器配置目录和本地生成的编译命令数据库，避免将开发环境文件纳入版本控制。

@@ -25,13 +25,13 @@ inline void* allocate(std::size_t bytes) {
         record_allocation(bytes);
         return pointer;
     }
-    throw std::bad_alloc{};
+    std::abort();
 }
 
 inline void* allocate_aligned(std::size_t bytes, std::size_t alignment) {
     const auto allocation_size = bytes == 0 ? alignment : bytes;
     if (allocation_size > std::numeric_limits<std::size_t>::max() - (alignment - 1)) {
-        throw std::bad_alloc{};
+        std::abort();
     }
     const auto rounded_size =
         ((allocation_size + alignment - 1) / alignment) * alignment;
@@ -39,7 +39,7 @@ inline void* allocate_aligned(std::size_t bytes, std::size_t alignment) {
         record_allocation(bytes);
         return pointer;
     }
-    throw std::bad_alloc{};
+    std::abort();
 }
 
 class AllocationScope {
@@ -124,7 +124,7 @@ inline constexpr bool allocation_profile_available = false;
 
 namespace benchmark {
 
-enum class phase { end_to_end, parse_only, decode_only, index_only, stage2_only };
+enum class phase { end_to_end, parse_only, decode_only, index_only, stage2_only, dom_walk_only, dom_to_document };
 
 struct options {
     std::string input_path;
@@ -137,56 +137,71 @@ struct options {
     phase selected_phase = phase::end_to_end;
 };
 
-inline std::string read_file(const std::string& path) {
+inline std::expected<std::string, std::string> readFile(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
-        throw std::runtime_error("cannot open benchmark input: " + path);
+        return std::unexpected("cannot open benchmark input: " + path);
     }
-    return {std::istreambuf_iterator<char>{input}, {}};
+    return std::string{std::istreambuf_iterator<char>{input}, {}};
 }
 
-inline options parse_options(int argc, char** argv, std::string default_path,
-                             bool json_tracks = false) {
+inline std::expected<options, std::string> parseOptions(int argc, char** argv,
+                                                         std::string default_path,
+                                                         bool json_tracks = false,
+                                                         bool simdjson_tracks = false) {
     options result;
     result.input_path = std::move(default_path);
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument{argv[index]};
-        auto next_value = [&](std::string_view name) -> std::string {
+        auto next_value = [&](std::string_view name) -> std::expected<std::string, std::string> {
             if (index + 1 >= argc) {
-                throw std::runtime_error("missing value for " + std::string(name));
+                return std::unexpected("missing value for " + std::string(name));
             }
             return argv[++index];
         };
         if (argument == "--input" || argument == "--json" || argument == "--toml") {
-            result.input_path = next_value(argument);
+            auto value = next_value(argument);
+            if (!value) return std::unexpected(value.error());
+            result.input_path = std::move(*value);
         } else if (argument == "--iterations") {
-            result.iterations = std::stoull(next_value(argument));
+            auto value = next_value(argument);
+            if (!value) return std::unexpected(value.error());
+            std::uint64_t parsed = 0;
+            const auto [end, error] = std::from_chars(value->data(), value->data() + value->size(), parsed);
+            if (error != std::errc{} || end != value->data() + value->size())
+                return std::unexpected("invalid --iterations value: " + *value);
+            result.iterations = parsed;
         } else if (argument == "--warmup") {
-            result.warmup = std::stoull(next_value(argument));
+            auto value = next_value(argument);
+            if (!value) return std::unexpected(value.error());
+            std::uint64_t parsed = 0;
+            const auto [end, error] = std::from_chars(value->data(), value->data() + value->size(), parsed);
+            if (error != std::errc{} || end != value->data() + value->size())
+                return std::unexpected("invalid --warmup value: " + *value);
+            result.warmup = parsed;
         } else if (argument == "--phase") {
-            const auto selected = next_value(argument);
+            auto selected_value = next_value(argument);
+            if (!selected_value) return std::unexpected(selected_value.error());
+            const auto& selected = *selected_value;
             if (selected == "end-to-end") {
                 result.selected_phase = phase::end_to_end;
             } else if (selected == "parse-only") {
                 result.selected_phase = phase::parse_only;
             } else if (selected == "decode-only") {
                 result.selected_phase = phase::decode_only;
-            } else if (json_tracks && selected == "index-only") {
-                result.selected_phase = phase::index_only;
-            } else if (json_tracks && selected == "stage2-only") {
-                result.selected_phase = phase::stage2_only;
+            } else if (simdjson_tracks && selected == "walk-only") {
+                result.selected_phase = phase::dom_walk_only;
+            } else if (simdjson_tracks && selected == "dom-to-document") {
+                result.selected_phase = phase::dom_to_document;
             } else {
-                throw std::runtime_error("unknown benchmark phase: " + selected);
+                return std::unexpected("unknown benchmark phase: " + selected);
             }
         } else if (argument == "--allocations") {
             result.allocations = true;
         } else if (json_tracks && argument == "--reuse-context") {
             result.reuse_context = true;
         } else if (json_tracks && argument == "--json-parser") {
-            const auto selected = next_value(argument);
-            if (selected == "structural") result.structural_index = true;
-            else if (selected == "bytewise") result.structural_index = false;
-            else throw std::runtime_error("unknown JSON parser: " + selected);
+            return std::unexpected("custom JSON parsers were removed; json::Json wraps simdjson");
         } else if (argument == "--csv") {
             result.csv = true;
         } else if (argument == "--help") {
@@ -196,25 +211,26 @@ inline options parse_options(int argc, char** argv, std::string default_path,
             std::println("--phase NAME               end-to-end, parse-only, or decode-only");
             std::println("--allocations              report timed allocation counts (profile binary)");
             if (json_tracks) {
-                std::println("--json-parser NAME         bytewise (default) or structural");
-                std::println("--reuse-context            reuse internal JSON node and scratch storage");
-                std::println("--phase index-only/stage2-only  supplementary structural parser phases");
+                std::println("--reuse-context            reuse json::Parser instead of fresh json::parse");
+            }
+            if (simdjson_tracks) {
+                std::println("--phase walk-only/dom-to-document  supplementary simdjson DOM phases");
             }
             std::println("--csv                     print CSV row");
             std::exit(0);
         } else {
-            throw std::runtime_error("unknown benchmark option: " + std::string(argument));
+            return std::unexpected("unknown benchmark option: " + std::string(argument));
         }
     }
     if (result.iterations == 0) {
-        throw std::runtime_error("iterations must be greater than zero");
+        return std::unexpected("iterations must be greater than zero");
     }
     if (result.allocations && !detail::allocation_profile_available) {
-        throw std::runtime_error("--allocations requires a *_alloc benchmark binary");
+        return std::unexpected("--allocations requires a *_alloc benchmark binary");
     }
-    if ((result.selected_phase == phase::index_only ||
-         result.selected_phase == phase::stage2_only) && !result.structural_index) {
-        throw std::runtime_error("index-only and stage2-only require --json-parser structural");
+    if (result.selected_phase == phase::index_only ||
+        result.selected_phase == phase::stage2_only) {
+        return std::unexpected("index-only and stage2-only were removed with the custom JSON parser");
     }
     return result;
 }
@@ -230,7 +246,7 @@ struct result {
     bool allocations_profiled{};
 };
 
-inline void print_result(const result& value, bool csv) {
+inline void printResult(const result& value, bool csv) {
     const auto mean_ns = value.seconds * 1.0e9 / static_cast<double>(value.iterations);
     const auto ops = static_cast<double>(value.iterations) / value.seconds;
     const auto mib = static_cast<double>(value.bytes) * value.iterations /
@@ -250,10 +266,20 @@ inline void print_result(const result& value, bool csv) {
 }
 
 template <class Parse>
-result measure(std::string_view name, std::string_view input, const options& options,
-               Parse&& parse) {
+std::expected<result, std::string> measure(std::string_view name, std::string_view input,
+                                           const options& options, Parse&& parse) {
+    auto invoke = [&]() -> std::expected<std::uint64_t, std::string> {
+        auto value = parse();
+        if constexpr (requires { value.has_value(); value.error(); }) {
+            if (!value) return std::unexpected(value.error());
+            return static_cast<std::uint64_t>(*value);
+        } else {
+            return static_cast<std::uint64_t>(value);
+        }
+    };
     for (std::size_t index = 0; index < options.warmup; ++index) {
-        static_cast<void>(parse());
+        auto warmed = invoke();
+        if (!warmed) return std::unexpected(warmed.error());
     }
     std::uint64_t checksum = 0;
     detail::AllocationTotals allocations;
@@ -262,18 +288,20 @@ result measure(std::string_view name, std::string_view input, const options& opt
         detail::AllocationScope AllocationScope{
             options.allocations ? std::addressof(allocations) : nullptr};
         for (std::size_t index = 0; index < options.iterations; ++index) {
-            checksum ^= static_cast<std::uint64_t>(parse());
+            auto value = invoke();
+            if (!value) return std::unexpected(value.error());
+            checksum ^= *value;
             checksum = (checksum << 7) | (checksum >> 57);
         }
     }
     const auto elapsed = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
-    return {std::string(name), input.size(), options.iterations, elapsed, checksum,
-            allocations.calls, allocations.bytes, options.allocations};
+    return result{std::string(name), input.size(), options.iterations, elapsed, checksum,
+                  allocations.calls, allocations.bytes, options.allocations};
 }
 
 template <class Node>
-std::uint64_t node_checksum(const Node& value) {
+std::uint64_t nodeChecksum(const Node& value) {
     return std::visit(
         [](const auto& item) -> std::uint64_t {
             using item_type = std::remove_cvref_t<decltype(item)>;

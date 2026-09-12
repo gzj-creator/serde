@@ -2838,31 +2838,23 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
 template <class T>
 result<std::string> serialize(const T& value,
                               const SerializeOptions& options = {}) {
-    try {
-        auto encoded = detail::encodeValue(value);
-        if (!encoded) {
-            return std::unexpected(encoded.error());
-        }
-        const auto* root = std::get_if<typename detail::Node::table>(&encoded->value);
-        if (root == nullptr) {
-            return std::unexpected(std::string("TOML serialization requires a reflected struct/table at the root"));
-        }
-        std::string output;
-        std::string failure;
-        if (!detail::appendTable(*root, {}, output, failure)) {
-            return std::unexpected(std::move(failure));
-        }
-        if (output.size() > options.max_output_bytes) {
-            return std::unexpected(std::string("TOML output exceeds configured size limit"));
-        }
-        return output;
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(std::string("TOML operation exhausted memory"));
-    } catch (const std::exception& error) {
-        return std::unexpected(std::string("TOML operation failed: ") + error.what());
-    } catch (...) {
-        return std::unexpected(std::string("TOML operation failed with an unknown exception"));
+    auto encoded = detail::encodeValue(value);
+    if (!encoded) {
+        return std::unexpected(encoded.error());
     }
+    const auto* root = std::get_if<typename detail::Node::table>(&encoded->value);
+    if (root == nullptr) {
+        return std::unexpected(std::string("TOML serialization requires a reflected struct/table at the root"));
+    }
+    std::string output;
+    std::string failure;
+    if (!detail::appendTable(*root, {}, output, failure)) {
+        return std::unexpected(std::move(failure));
+    }
+    if (output.size() > options.max_output_bytes) {
+        return std::unexpected(std::string("TOML output exceeds configured size limit"));
+    }
+    return output;
 }
 
 /**
@@ -2885,19 +2877,11 @@ result<std::string> try_serialize(const T& value, const SerializeOptions& option
 template <class T>
 result<T> deserialize(std::string_view text,
                       const ParseOptions& options = {}) {
-    try {
-        auto parsed = detail::parseDocument(text, options);
-        if (!parsed) {
-            return std::unexpected(parsed.error());
-        }
-        return detail::decodeValue<T>(*parsed, {}, options);
-    } catch (const std::bad_alloc&) {
-        return std::unexpected(std::string("TOML operation exhausted memory"));
-    } catch (const std::exception& error) {
-        return std::unexpected(std::string("TOML operation failed: ") + error.what());
-    } catch (...) {
-        return std::unexpected(std::string("TOML operation failed with an unknown exception"));
+    auto parsed = detail::parseDocument(text, options);
+    if (!parsed) {
+        return std::unexpected(parsed.error());
     }
+    return detail::decodeValue<T>(*parsed, {}, options);
 }
 
 /**

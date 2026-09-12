@@ -8,12 +8,17 @@ standard    = "c++23"
 [toolchain]
 default = "llvm@22.1.8"
 
+[lib]
+path = "src/json/json.cppm"
+
 [build]
 default-profile = "debug"
+dialect_cxxflags = ["-fno-exceptions"]
+sources = ["src/**/*.cppm", "third_party/simdjson/simdjson.cpp"]
+defines = ["SIMDJSON_EXCEPTIONS=0", "nssv_CONFIG_NO_EXCEPTIONS=1"]
 
-[targets.app]
-kind = "bin"
-main = "src/main.cpp"
+[targets.serde]
+kind = "lib"
 
 [targets.benchmark_serde_json]
 kind = "bin"

@@ -108,6 +108,13 @@ int main() {
     passed &= json::deserialize<std::string>(R"("\uD800")").has_value() == false;
     passed &= json::deserialize<required>(R"({"value":1,})").has_value() == false;
     passed &= json::deserialize<required>(R"({"value":1,"value":2})").has_value() == false;
+    json::ParseOptions first_wins;
+    first_wins.duplicate_keys = json::DuplicateKeyPolicy::first_wins;
+    const auto duplicated = json::deserialize<required>(R"({"value":1,"value":2})", first_wins);
+    passed &= duplicated && duplicated->value == 1;
+    json::ParseOptions depth_only;
+    depth_only.max_depth = 64;
+    passed &= json::deserialize<required>(R"({"value":1,"value":2})", depth_only).has_value() == false;
     passed &= json::deserialize<required>(R"({"value":01})").has_value() == false;
     passed &= json::deserialize<required>(R"({"value":1} trailing)").has_value() == false;
     passed &= static_cast<bool>(json::deserialize<required>(R"({"value":1,"extra":2})"));
@@ -154,5 +161,18 @@ int main() {
     const auto leap_day = json::deserialize<json::date>(R"("2024-02-29")");
     passed &= leap_day && *leap_day == json::date{2024, 2, 29};
     passed &= json::deserialize<json::date>(R"("2024-02-30")").has_value() == false;
+
+    const auto root = json::parse(R"({"title":"serde","values":[1,true,null]})");
+    passed &= static_cast<bool>(root);
+    if (root) {
+        passed &= root->is_object() && root->size() == 2 && root->contains("title");
+        passed &= root->at("title").as_string() && *root->at("title").as_string() == "serde";
+        passed &= root->at("values").is_array() && root->at("values").size() == 3;
+        passed &= root->at("values").at(0).as_int64() && *root->at("values").at(0).as_int64() == 1;
+        passed &= root->at("values").at(1).as_bool() && *root->at("values").at(1).as_bool();
+        passed &= root->at("values").at(2).is_null();
+        passed &= !root->at("missing").valid();
+    }
+
     return passed ? 0 : 1;
 }

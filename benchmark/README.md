@@ -10,8 +10,9 @@ modules. The reference implementations are kept in separate executables:
 
 The serde and reference libraries are intentionally not included in one
 translation unit. serde exports `namespace toml`, which would collide with the
-toml++ namespace. The reference sources include the vendored libraries from
-the sibling `galay` and `tomlplusplus-3.4.0` directories.
+toml++ namespace. simdjson is vendored under `third_party/simdjson` and compiled
+into the serde library; the standalone `benchmark_simdjson` still includes that
+header directly so the comparison stays in a separate binary.
 
 Build and run all four benchmarks with:
 
@@ -46,6 +47,9 @@ target/.../bin/benchmark_serde_json --phase parse-only --iterations 10000 --warm
 target/.../bin/benchmark_serde_json --phase decode-only --iterations 10000 --warmup 3
 target/.../bin/benchmark_serde_toml --phase parse-only --iterations 10000 --warmup 3
 target/.../bin/benchmark_serde_toml --phase decode-only --iterations 10000 --warmup 3
+target/.../bin/benchmark_simdjson --phase parse-only --iterations 10000 --warmup 3
+target/.../bin/benchmark_simdjson --phase walk-only --iterations 10000 --warmup 3
+target/.../bin/benchmark_simdjson --phase dom-to-document --iterations 10000 --warmup 3
 ```
 
 `parse-only` performs the same input validation and DOM construction used by
@@ -54,14 +58,30 @@ measures typed reflection decoding from that immutable DOM. Phase checksums
 only keep the measured result live, so compare phase timings within a format,
 not with the end-to-end checksum.
 
+The simdjson supplementary phases use one padded input and one reusable parser
+in the same way as the default `simdjson-dom` track. `parse-only` times parser
+work, `walk-only` times the existing DOM checksum walk over a checked DOM, and
+`dom-to-document` times conversion from that DOM into the benchmark's typed
+document, including strings, vectors, and map nodes. These tracks are opt-in;
+the default `run.sh` output remains four rows.
+
 `benchmark_serde_json_alloc` and `benchmark_serde_toml_alloc` are separate
 profiling binaries. Add `--allocations` to report allocation calls and requested
 bytes for the timed loop. They intercept allocation only in those binaries and
 are deliberately excluded from `run.sh`, so the normal throughput results do
 not include profiler overhead.
 
-The default four-row command is unchanged. JSON-only supplementary tracks can
-be selected on `benchmark_serde_json` with `--json-parser bytewise|structural`
-and `--reuse-context`. The structural track builds a portable scalar index
-before Stage 2; `--phase index-only` and `--phase stage2-only` separate those
-costs. These options are profiling aids and are not used by `run.sh`.
+`benchmark/profile_allocations.sh` creates scalar, long-string, vector, map,
+server, nested-zone, default, medium, and large fixtures under `/tmp`, then
+reports allocation calls, requested bytes, and mean nanoseconds per operation
+for JSON and TOML decode-only. The fixtures are removed on exit and are not
+part of the repository.
+
+Cacheline counters were checked before adding representation experiments.
+Valgrind/cachegrind is unavailable in the measurement environment, and
+`perf_event_paranoid=4` blocks hardware cache events. No cacheline conclusion
+is inferred from timing alone; map/node representation work remains deferred.
+
+The default four-row command is unchanged. Default JSON `parse-only` measures
+a fresh `json::parse` each iteration. `--reuse-context` switches to a reused
+`json::Parser`. The old bytewise/structural custom parser phases were removed.

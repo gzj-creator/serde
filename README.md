@@ -1,14 +1,14 @@
 # serde
 
-无依赖的 C++ 序列化库，提供 TOML 和 JSON 编解码功能。
+C++ 序列化库，提供 TOML 和 JSON 编解码。JSON 解析由项目内的 simdjson 完成。
 
 ## 特性
 
-- **无第三方依赖**：完全自包含，不依赖 simdjson、nlohmann/json、toml++ 等
+- **内置 JSON 后端**：vendored simdjson 4.6.9 直接参与库构建，对外只暴露 `json::Json` 包装接口
 - **编译器无关**：基于编译器无关的反射模块，支持 LLVM/Clang 和 GCC
 - **确定性序列化**：输出格式规范、可预测
-- **资源限制**：内置字节、深度、节点等限制，防止资源滥用
-- **C++23**：使用 `std::expected` 进行错误处理，不抛出异常
+- **资源限制**：默认校验字节、深度、节点、字符串和容器上限；可用 `enforce_document_limits = false` 关闭整树校验
+- **C++23**：语法和限制错误走 `std::expected`。库以 `-fno-exceptions` 构建，内存耗尽会终止进程
 
 ## 模块
 
@@ -45,8 +45,10 @@ auto parsed = toml::deserialize<config::server>(*text);  // 反序列化
 src/
 ├── reflect/    # 反射模块
 ├── toml/       # TOML 编解码
-├── json/       # JSON 编解码
-└── main.cpp    # 示例入口
+└── json/       # JSON 编解码
+
+third_party/
+└── simdjson/   # 内置 JSON 后端，直接参与库构建
 
 docs/
 ├── reflect-README.md
@@ -63,8 +65,8 @@ docs/
 mcpp build
 ```
 
-默认使用 LLVM 22.1.8 工具链。
+默认使用 LLVM 22.1.8 工具链和 debug profile，生成 `serde` 静态库。基准测试请用 `mcpp build --profile release` 或 `benchmark/run.sh`。
 
 ## 许可证
 
-Apache-2.0
+Apache-2.0。vendored simdjson 使用其上游许可证，见 `third_party/simdjson/LICENSE.md`。

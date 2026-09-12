@@ -51,78 +51,43 @@ std::uint64_t checksum(const document& value) {
     return result;
 }
 
-benchmark::result measure_supplementary(std::string_view input,
-                                        const benchmark::options& options,
-                                        const document& checked) {
-    json::detail::parser_context context;
-    auto parsed = json::detail::parseDocumentReusable(
-        input, {}, context, options.structural_index);
-    if (!parsed) throw std::runtime_error(parsed.error());
-    auto decoded = json::detail::decodeValue<document>(**parsed, {}, {});
-    if (!decoded) throw std::runtime_error(decoded.error());
-    if (*decoded != checked) throw std::runtime_error("JSON profiling track differs from public decode");
+std::expected<benchmark::result, std::string> measureSupplementary(
+    std::string_view input, const benchmark::options& options, const document& checked) {
+    json::Parser parser;
+    auto parsed = parser.parse(input);
+    if (!parsed) return std::unexpected(parsed.error());
+    auto decoded = json::decode<document>(*parsed);
+    if (!decoded) return std::unexpected(decoded.error());
+    if (*decoded != checked) return std::unexpected("JSON profiling track differs from public decode");
 
-    std::string name = options.structural_index ? "serde-json-structural" : "serde-json-bytewise";
+    std::string name = "serde-json";
     name += options.reuse_context ? "-reuse" : "-fresh";
     if (options.selected_phase == benchmark::phase::decode_only) {
-        return benchmark::measure(name + "-decode-only", input, options, [&]() {
-            auto value = json::detail::decodeValue<document>(context.root, {}, {});
-            if (!value) throw std::runtime_error(value.error());
+        return benchmark::measure(name + "-decode-only", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+            auto value = json::decode<document>(*parsed);
+            if (!value) return std::unexpected(value.error());
             return checksum(*value);
         });
     }
-    if (options.selected_phase == benchmark::phase::index_only) {
-        auto index = [&](auto& indexes) {
-            json::detail::buildStructuralIndexes(input, indexes);
-            return indexes.size();
-        };
-        if (options.reuse_context) {
-            return benchmark::measure(name + "-index-only", input, options, [&]() {
-                return index(context.structural_indexes);
-            });
+    auto observe = [&](const json::Json& value) -> std::expected<std::uint64_t, std::string> {
+        if (options.selected_phase == benchmark::phase::parse_only) {
+            return value.is_object() ? std::uint64_t{1} : std::uint64_t{0};
         }
-        return benchmark::measure(name + "-index-only", input, options, [&]() {
-            std::vector<std::size_t> indexes;
-            return index(indexes);
-        });
-    }
-    auto observe = [&](const json::detail::node& value) {
-        if (options.selected_phase == benchmark::phase::parse_only ||
-            options.selected_phase == benchmark::phase::stage2_only) {
-            return benchmark::node_checksum(value);
-        }
-        auto result = json::detail::decodeValue<document>(value, {}, {});
-        if (!result) throw std::runtime_error(result.error());
+        auto result = json::decode<document>(value);
+        if (!result) return std::unexpected(result.error());
         return checksum(*result);
     };
-    if (options.selected_phase == benchmark::phase::stage2_only) {
-        return benchmark::measure(name + "-stage2-only", input, options, [&]() {
-            const json::ParseOptions limits;
-            json::detail::BasicParser<true> parser{
-                input, limits, &context, context.structural_indexes};
-            if (options.reuse_context) {
-                auto value = parser.parse_reusable();
-                if (!value) throw std::runtime_error(value.error());
-                return observe(**value);
-            }
-            auto value = parser.parse();
-            if (!value) throw std::runtime_error(value.error());
+    if (options.selected_phase == benchmark::phase::parse_only) name += "-parse-only";
+    if (options.reuse_context) {
+        return benchmark::measure(name, input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+            auto value = parser.parse(input);
+            if (!value) return std::unexpected(value.error());
             return observe(*value);
         });
     }
-    if (options.selected_phase == benchmark::phase::parse_only) name += "-parse-only";
-    if (options.reuse_context) {
-        return benchmark::measure(name, input, options, [&]() {
-            auto value = json::detail::parseDocumentReusable(
-                input, {}, context, options.structural_index);
-            if (!value) throw std::runtime_error(value.error());
-            return observe(**value);
-        });
-    }
-    return benchmark::measure(name, input, options, [&]() {
-        json::detail::parser_context fresh;
-        auto value = json::detail::parseDocumentIndexed(input, {}, fresh);
-        if (!value) throw std::runtime_error(value.error());
+    return benchmark::measure(name, input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+        auto value = json::parse(input);
+        if (!value) return std::unexpected(value.error());
         return observe(*value);
     });
 }
@@ -130,45 +95,45 @@ benchmark::result measure_supplementary(std::string_view input,
 }  // namespace
 
 int main(int argc, char** argv) {
-    try {
-        auto options = benchmark::parse_options(argc, argv, "benchmark/data/config.json", true);
-        const auto input = benchmark::read_file(options.input_path);
-        const auto checked = json::deserialize<document>(input);
-        if (!checked) {
-            std::println(stderr, "serde JSON fixture rejected: {}", checked.error());
-            return 1;
-        }
-        const auto measured = [&]() {
-            if (options.reuse_context || options.structural_index) {
-                return measure_supplementary(input, options, *checked);
-            }
-            if (options.selected_phase == benchmark::phase::end_to_end) {
-                return benchmark::measure("serde-json", input, options, [&]() {
-                    auto parsed = json::deserialize<document>(input);
-                    if (!parsed) throw std::runtime_error(parsed.error());
-                    return checksum(*parsed);
-                });
-            }
-
-            auto document_node = json::detail::parseDocument(input, {});
-            if (!document_node) throw std::runtime_error(document_node.error());
-            if (options.selected_phase == benchmark::phase::parse_only) {
-                return benchmark::measure("serde-json-parse-only", input, options, [&]() {
-                    auto parsed = json::detail::parseDocument(input, {});
-                    if (!parsed) throw std::runtime_error(parsed.error());
-                    return benchmark::node_checksum(*parsed);
-                });
-            }
-            return benchmark::measure("serde-json-decode-only", input, options, [&]() {
-                auto parsed = json::detail::decodeValue<document>(*document_node, {}, {});
-                if (!parsed) throw std::runtime_error(parsed.error());
-                return checksum(*parsed);
-            });
-        }();
-        benchmark::print_result(measured, options.csv);
-        return 0;
-    } catch (const std::exception& error) {
-        std::println(stderr, "{}", error.what());
+    auto options_result = benchmark::parseOptions(argc, argv, "benchmark/data/config.json", true);
+    if (!options_result) { std::println(stderr, "{}", options_result.error()); return 2; }
+    auto options = std::move(*options_result);
+    auto input_result = benchmark::readFile(options.input_path);
+    if (!input_result) { std::println(stderr, "{}", input_result.error()); return 2; }
+    const auto& input = *input_result;
+    const auto checked = json::deserialize<document>(input);
+    if (!checked) {
+        std::println(stderr, "serde JSON fixture rejected: {}", checked.error());
         return 1;
     }
+    const auto measured = [&]() -> std::expected<benchmark::result, std::string> {
+        if (options.reuse_context) {
+            return measureSupplementary(input, options, *checked);
+        }
+        if (options.selected_phase == benchmark::phase::end_to_end) {
+            return benchmark::measure("serde-json", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+                auto parsed = json::deserialize<document>(input);
+                if (!parsed) return std::unexpected(parsed.error());
+                return checksum(*parsed);
+            });
+        }
+
+        if (options.selected_phase == benchmark::phase::parse_only) {
+            return benchmark::measure("serde-json-parse-only", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+                auto parsed = json::parse(input);
+                if (!parsed) return std::unexpected(parsed.error());
+                return parsed->is_object() ? std::uint64_t{1} : std::uint64_t{0};
+            });
+        }
+        auto parsed_document = json::parse(input);
+        if (!parsed_document) return std::unexpected(parsed_document.error());
+        return benchmark::measure("serde-json-decode-only", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+            auto parsed = json::decode<document>(*parsed_document);
+            if (!parsed) return std::unexpected(parsed.error());
+            return checksum(*parsed);
+        });
+    }();
+    if (!measured) { std::println(stderr, "{}", measured.error()); return 1; }
+    benchmark::printResult(*measured, options.csv);
+    return 0;
 }

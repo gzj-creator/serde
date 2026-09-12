@@ -51,42 +51,42 @@ std::uint64_t checksum(const document& value) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    try {
-        auto options = benchmark::parse_options(argc, argv, "benchmark/data/config.toml");
-        const auto input = benchmark::read_file(options.input_path);
-        const auto checked = toml::deserialize<document>(input);
-        if (!checked) {
-            std::println(stderr, "serde TOML fixture rejected: {}", checked.error());
-            return 1;
-        }
-        const auto measured = [&]() {
-            if (options.selected_phase == benchmark::phase::end_to_end) {
-                return benchmark::measure("serde-toml", input, options, [&]() {
-                    auto parsed = toml::deserialize<document>(input);
-                    if (!parsed) throw std::runtime_error(parsed.error());
-                    return checksum(*parsed);
-                });
-            }
-
-            auto document_node = toml::detail::parseDocument(input, {});
-            if (!document_node) throw std::runtime_error(document_node.error());
-            if (options.selected_phase == benchmark::phase::parse_only) {
-                return benchmark::measure("serde-toml-parse-only", input, options, [&]() {
-                    auto parsed = toml::detail::parseDocument(input, {});
-                    if (!parsed) throw std::runtime_error(parsed.error());
-                    return benchmark::node_checksum(*parsed);
-                });
-            }
-            return benchmark::measure("serde-toml-decode-only", input, options, [&]() {
-                auto parsed = toml::detail::decodeValue<document>(*document_node, {}, {});
-                if (!parsed) throw std::runtime_error(parsed.error());
-                return checksum(*parsed);
-            });
-        }();
-        benchmark::print_result(measured, options.csv);
-        return 0;
-    } catch (const std::exception& error) {
-        std::println(stderr, "{}", error.what());
+    auto options_result = benchmark::parseOptions(argc, argv, "benchmark/data/config.toml");
+    if (!options_result) { std::println(stderr, "{}", options_result.error()); return 2; }
+    auto options = std::move(*options_result);
+    auto input_result = benchmark::readFile(options.input_path);
+    if (!input_result) { std::println(stderr, "{}", input_result.error()); return 2; }
+    const auto& input = *input_result;
+    const auto checked = toml::deserialize<document>(input);
+    if (!checked) {
+        std::println(stderr, "serde TOML fixture rejected: {}", checked.error());
         return 1;
     }
+    const auto measured = [&]() -> std::expected<benchmark::result, std::string> {
+        if (options.selected_phase == benchmark::phase::end_to_end) {
+            return benchmark::measure("serde-toml", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+                auto parsed = toml::deserialize<document>(input);
+                if (!parsed) return std::unexpected(parsed.error());
+                return checksum(*parsed);
+            });
+        }
+
+        auto document_node = toml::detail::parseDocument(input, {});
+        if (!document_node) return std::unexpected(document_node.error());
+        if (options.selected_phase == benchmark::phase::parse_only) {
+            return benchmark::measure("serde-toml-parse-only", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+                auto parsed = toml::detail::parseDocument(input, {});
+                if (!parsed) return std::unexpected(parsed.error());
+                return benchmark::nodeChecksum(*parsed);
+            });
+        }
+        return benchmark::measure("serde-toml-decode-only", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+            auto parsed = toml::detail::decodeValue<document>(*document_node, {}, {});
+            if (!parsed) return std::unexpected(parsed.error());
+            return checksum(*parsed);
+        });
+    }();
+    if (!measured) { std::println(stderr, "{}", measured.error()); return 1; }
+    benchmark::printResult(*measured, options.csv);
+    return 0;
 }

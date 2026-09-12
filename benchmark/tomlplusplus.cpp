@@ -1,6 +1,7 @@
 import std;
 
 #include "common.hpp"
+#define TOML_EXCEPTIONS 0
 #include "../../tomlplusplus-3.4.0/toml.hpp"
 
 namespace {
@@ -26,19 +27,20 @@ std::uint64_t checksum(const toml::table& root) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    try {
-        auto options = benchmark::parse_options(argc, argv, "benchmark/data/config.toml");
-        const auto input = benchmark::read_file(options.input_path);
-        auto checked = toml::parse(input);
-        static_cast<void>(checked);
-        const auto measured = benchmark::measure("toml++", input, options, [&]() {
-            const auto parsed = toml::parse(input);
-            return checksum(parsed);
-        });
-        benchmark::print_result(measured, options.csv);
-        return 0;
-    } catch (const std::exception& error) {
-        std::println(stderr, "{}", error.what());
-        return 1;
-    }
+    auto options_result = benchmark::parseOptions(argc, argv, "benchmark/data/config.toml");
+    if (!options_result) { std::println(stderr, "{}", options_result.error()); return 2; }
+    auto options = std::move(*options_result);
+    auto input_result = benchmark::readFile(options.input_path);
+    if (!input_result) { std::println(stderr, "{}", input_result.error()); return 2; }
+    const auto& input = *input_result;
+    auto checked = toml::parse(input);
+    if (!checked) { std::println(stderr, "{}", checked.error().description()); return 1; }
+    const auto measured = benchmark::measure("toml++", input, options, [&]() -> std::expected<std::uint64_t, std::string> {
+        const auto parsed = toml::parse(input);
+        if (!parsed) return std::unexpected(std::string(parsed.error().description()));
+        return checksum(parsed.table());
+    });
+    if (!measured) { std::println(stderr, "{}", measured.error()); return 1; }
+    benchmark::printResult(*measured, options.csv);
+    return 0;
 }
