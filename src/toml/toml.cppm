@@ -221,7 +221,7 @@ struct MapTraits<std::unordered_map<std::string, Value, Hash, Equal,
 
 struct Node {
     using array = std::vector<Node>;
-    using table = std::map<std::string, Node>;
+    using table = std::map<std::string, Node, std::less<>>;
     using storage = std::variant<std::monostate, bool, std::int64_t, double,
                                  std::string, date, time, local_date_time,
                                  offset_date_time, array, table>;
@@ -563,17 +563,51 @@ inline result<std::string> parseKey(std::string_view raw_key) {
 }
 
 /**
+ * @brief 保存 TOML 键路径，常见的短路径直接使用栈内存。
+ */
+struct KeyPath {
+    static constexpr std::size_t inline_capacity = 4;
+    std::array<std::string, inline_capacity> inline_parts{};
+    std::vector<std::string> overflow;
+    std::size_t count = 0;
+
+    void push_back(std::string value) {
+        if (count < inline_capacity) {
+            inline_parts[count] = std::move(value);
+        } else {
+            if (overflow.empty()) overflow.reserve(inline_capacity);
+            overflow.push_back(std::move(value));
+        }
+        ++count;
+    }
+    std::size_t size() const noexcept { return count; }
+    bool empty() const noexcept { return count == 0; }
+    const std::string& operator[](std::size_t index) const noexcept {
+        return index < inline_capacity
+                   ? inline_parts[index]
+                   : overflow[index - inline_capacity];
+    }
+    std::string& operator[](std::size_t index) noexcept {
+        return index < inline_capacity
+                   ? inline_parts[index]
+                   : overflow[index - inline_capacity];
+    }
+    const std::string& back() const noexcept { return (*this)[count - 1]; }
+};
+
+/**
  * @brief 解析由点分隔的 TOML 键路径。
  * @param raw 原始键路径文本。
  * @return 按层级拆分后的键名列表，或包含原因的错误结果。
  */
-inline result<std::vector<std::string>> parseKeyPath(std::string_view raw,
-                                                        std::size_t max_key_bytes = std::numeric_limits<std::size_t>::max(),
-                                                        std::size_t max_components = std::numeric_limits<std::size_t>::max()) {
+inline result<KeyPath> parseKeyPath(
+    std::string_view raw,
+    std::size_t max_key_bytes = std::numeric_limits<std::size_t>::max(),
+    std::size_t max_components = std::numeric_limits<std::size_t>::max()) {
     if (raw.size() > max_key_bytes) {
         return std::unexpected(std::string("TOML key exceeds configured size limit"));
     }
-    std::vector<std::string> parts;
+    KeyPath parts;
     std::size_t start = 0;
     bool double_quoted = false;
     bool single_quoted = false;
@@ -646,8 +680,9 @@ inline bool number_digit(char value, int base) {
  * `from_chars` 有意接受比 TOML 更宽的语法（例如前导零和小数点后缺少数字），
  * 因此词法检查放在这里，而不是依赖库转换例程。
  */
-inline result<std::string> normalize_number_lexeme(std::string_view text,
-                                                   bool& floating, int& base) {
+inline result<std::string_view> normalize_number_lexeme(std::string_view text,
+                                                        bool& floating, int& base,
+                                                        std::string& normalized_storage) {
     floating = false;
     base = 10;
     if (text.empty()) {
@@ -704,12 +739,16 @@ inline result<std::string> normalize_number_lexeme(std::string_view text,
         }
     }
 
-    std::string normalized;
-    normalized.reserve(text.size());
-    for (const char character : text) {
-        if (character != '_') {
-            normalized.push_back(character);
+    // Keep the common no-separator spelling as a view into the input.
+    std::string_view normalized = text;
+    if (text.find('_') != std::string_view::npos) {
+        normalized_storage.reserve(text.size());
+        for (const char character : text) {
+            if (character != '_') {
+                normalized_storage.push_back(character);
+            }
         }
+        normalized = normalized_storage;
     }
     if (prefixed) {
         return normalized;
@@ -992,7 +1031,7 @@ inline result<Node> parse_temporal_value(std::string_view text) {
  * @return 插入成功时返回 `true`；路径冲突、为空或键重复时返回 `false`。
  */
 inline bool insertValueAt(Node::table& root,
-                            const std::vector<std::string>& path,
+                            const KeyPath& path,
                             Node value) {
     if (path.empty()) {
         return false;
@@ -1653,11 +1692,13 @@ private:
         }
         bool lexical_floating = false;
         int lexical_base = 10;
-        auto normalized_result = normalize_number_lexeme(atom, lexical_floating, lexical_base);
+        std::string normalized_storage;
+        auto normalized_result = normalize_number_lexeme(
+            atom, lexical_floating, lexical_base, normalized_storage);
         if (!normalized_result) {
             return std::unexpected(normalized_result.error());
         }
-        const std::string& normalized = *normalized_result;
+        const std::string_view normalized = *normalized_result;
 
         const bool floating = lexical_floating;
         if (floating) {
@@ -1671,8 +1712,8 @@ private:
                 floating_text.data(), floating_text.data() + floating_text.size(), value,
                 std::chars_format::general);
             if (error != std::errc{} || end != floating_text.data() + floating_text.size()) {
-                return std::unexpected(std::string("invalid TOML floating-point value: ") +
-                                       normalized);
+                return std::unexpected(
+                    std::string("invalid TOML floating-point value: ") + std::string(normalized));
             }
             return Node{value};
         }
@@ -1688,14 +1729,14 @@ private:
             digits.remove_prefix(2);
         }
         if (digits.empty()) {
-            return std::unexpected(std::string("unsupported TOML value: ") + normalized);
+            return std::unexpected(std::string("unsupported TOML value: ") + std::string(normalized));
         }
 
         std::uint64_t magnitude = 0;
         const auto [end, error] = std::from_chars(
             digits.data(), digits.data() + digits.size(), magnitude, base);
         if (error != std::errc{} || end != digits.data() + digits.size()) {
-            return std::unexpected(std::string("unsupported TOML value: ") + normalized);
+            return std::unexpected(std::string("unsupported TOML value: ") + std::string(normalized));
         }
 
         constexpr auto positive_limit =
@@ -1947,20 +1988,23 @@ private:
      * @return 目标表指针，或与标量值冲突的错误。
      */
     static result<Node::table*> open_table(
-        Node::table& root, const std::vector<std::string>& path,
+        Node::table& root, const KeyPath& path,
         bool allow_terminal_array_table = false,
-        bool define_terminal_table = true) {
+        bool define_terminal_table = true,
+        std::size_t path_length = std::numeric_limits<std::size_t>::max()) {
+        const auto length =
+            path_length == std::numeric_limits<std::size_t>::max() ? path.size() : path_length;
         Node::table* table = &root;
-        for (std::size_t index = 0; index < path.size(); ++index) {
+        for (std::size_t index = 0; index < length; ++index) {
             const auto& part = path[index];
             auto [iterator, inserted] = table->try_emplace(part, Node{Node::table{}});
             if (std::holds_alternative<Node::table>(iterator->second.value) &&
                 !iterator->second.inline_table) {
-                if (define_terminal_table && !inserted && index + 1 == path.size() &&
+                if (define_terminal_table && !inserted && index + 1 == length &&
                     iterator->second.definition != Node::TableDefinition::implicit) {
                     return std::unexpected(std::string("duplicate TOML table definition"));
                 }
-                if (define_terminal_table && index + 1 == path.size()) {
+                if (define_terminal_table && index + 1 == length) {
                     iterator->second.definition = Node::TableDefinition::explicit_table;
                 }
                 table = &std::get<Node::table>(iterator->second.value);
@@ -1968,7 +2012,7 @@ private:
             }
             if (auto* array = std::get_if<Node::array>(&iterator->second.value);
                 iterator->second.array_table && array != nullptr && !array->empty() &&
-                (index + 1 < path.size() || allow_terminal_array_table) &&
+                (index + 1 < length || allow_terminal_array_table) &&
                 std::holds_alternative<Node::table>(array->back().value)) {
                 table = &std::get<Node::table>(array->back().value);
                 continue;
@@ -1985,12 +2029,11 @@ private:
      * @return 新元素的表指针，或路径冲突错误。
      */
     static result<Node::table*> open_array_table(
-        Node::table& root, const std::vector<std::string>& path) {
+        Node::table& root, const KeyPath& path) {
         if (path.empty()) {
             return std::unexpected(std::string("empty TOML array-table header"));
         }
-        std::vector<std::string> parent_path(path.begin(), path.end() - 1);
-        auto parent = open_table(root, parent_path, true, false);
+        auto parent = open_table(root, path, true, false, path.size() - 1);
         if (!parent) {
             return std::unexpected(parent.error());
         }
@@ -2775,7 +2818,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                     failure = where + " field '" + std::string(descriptor.name) +
                               "' is not assignable";
                 } else {
-                    const auto iterator = values->find(std::string(descriptor.name));
+                    const auto iterator = values->find(descriptor.name);
                     if (iterator == values->end()) {
                         if constexpr (OptionalTraits<Member>::value) {
                             return;

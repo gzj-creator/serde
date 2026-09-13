@@ -84,10 +84,16 @@ public:
     bool contains(std::string_view key) const noexcept { return at(key).valid(); }
     std::size_t size() const noexcept {
         if (!valid()) return 0;
-        if (auto text = element_.get_string(); !text.error()) return text.value_unsafe().size();
-        if (auto values = element_.get_array(); !values.error()) return values.value_unsafe().size();
-        if (auto values = element_.get_object(); !values.error()) return values.value_unsafe().size();
-        return 0;
+        switch (element_.type()) {
+            case simdjson::dom::element_type::STRING:
+                return element_.get_string().value_unsafe().size();
+            case simdjson::dom::element_type::ARRAY:
+                return element_.get_array().value_unsafe().size();
+            case simdjson::dom::element_type::OBJECT:
+                return element_.get_object().value_unsafe().size();
+            default:
+                return 0;
+        }
     }
     Json at(std::string_view key) const noexcept {
         if (!is_object()) return {};
@@ -1136,7 +1142,11 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
             return std::unexpected(std::string("JSON parse error: node count exceeds configured limit"));
         }
     }
-    if (value.is_string()) {
+
+    // Read the tape type once. Calling each is_* predicate in sequence repeats
+    // the validity and type checks for every scalar in a document.
+    const auto type = value.type();
+    if (type == ValueType::string) {
         auto text = value.as_string();
         if (!text) return std::unexpected(text.error());
         if (options.enforce_document_limits && text->size() > options.max_string_bytes) {
@@ -1144,7 +1154,7 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
         }
         return {};
     }
-    if (value.is_array()) {
+    if (type == ValueType::array) {
         if (options.enforce_document_limits && value.size() > options.max_array_items) {
             return std::unexpected(std::string("JSON array item count exceeds configured limit"));
         }
@@ -1152,23 +1162,53 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
             return enforce_limits(child, options, depth + 1, nodes);
         });
     }
-    if (value.is_object()) {
-        if (options.enforce_document_limits && value.size() > options.max_object_members) {
-            return std::unexpected(std::string("JSON object member count exceeds configured limit"));
+    if (type != ValueType::object) return {};
+
+    const auto member_count = value.size();
+    if (options.enforce_document_limits && member_count > options.max_object_members) {
+        return std::unexpected(std::string("JSON object member count exceeds configured limit"));
+    }
+
+    // Most JSON objects are small. Keep their keys in a stack array so the
+    // default duplicate-key check does not allocate a tree node per member.
+    constexpr std::size_t inline_seen_capacity = 16;
+    const bool reject_duplicates =
+        options.duplicate_keys == DuplicateKeyPolicy::reject;
+    std::array<std::string_view, inline_seen_capacity> seen_inline{};
+    std::vector<std::string_view> seen_heap;
+    std::size_t seen_count = 0;
+    if (reject_duplicates && member_count > inline_seen_capacity) {
+        seen_heap.reserve(member_count);
+    }
+    return value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
+        if (options.enforce_document_limits && key.size() > options.max_key_bytes) {
+            return std::unexpected(std::string("JSON object key exceeds configured size limit"));
         }
-        std::map<std::string_view, std::size_t> seen;
-        return value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
-            if (options.enforce_document_limits && key.size() > options.max_key_bytes) {
-                return std::unexpected(std::string("JSON object key exceeds configured size limit"));
+        if (reject_duplicates) {
+            bool duplicate = false;
+            if (member_count <= inline_seen_capacity) {
+                for (std::size_t index = 0; index < seen_count; ++index) {
+                    if (seen_inline[index] == key) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) seen_inline[seen_count++] = key;
+            } else {
+                for (const auto existing : seen_heap) {
+                    if (existing == key) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) seen_heap.push_back(key);
             }
-            if (options.duplicate_keys == DuplicateKeyPolicy::reject &&
-                !seen.emplace(key, 0).second) {
+            if (duplicate) {
                 return std::unexpected(std::string("JSON parse error: duplicate object key"));
             }
-            return enforce_limits(child, options, depth + 1, nodes);
-        });
-    }
-    return {};
+        }
+        return enforce_limits(child, options, depth + 1, nodes);
+    });
 }
 
 inline Parser& thread_parser() {
