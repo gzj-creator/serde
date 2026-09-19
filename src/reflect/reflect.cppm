@@ -42,10 +42,34 @@ constexpr decltype(auto) getFields(const T& value) {
     return reflect_fields(value);
 }
 
+template <class T>
+constexpr std::size_t staticFieldNamesChecksum() {
+    auto descriptors = reflect_fields(std::type_identity<std::remove_cvref_t<T>>{});
+    std::size_t checksum = 0;
+    std::apply([&](const auto&... descriptor) {
+        ([&] {
+            for (const unsigned char character : descriptor.name) checksum += character;
+        }(), ...);
+    }, descriptors);
+    return checksum;
+}
+
 }  // namespace detail
 
 template <class T>
 concept Reflectable = detail::hasAnyFields<T>;
+
+template <class T>
+concept StaticReflectable = Reflectable<T> && requires {
+    reflect_fields(std::type_identity<std::remove_cvref_t<T>>{});
+    typename std::integral_constant<std::size_t, detail::staticFieldNamesChecksum<T>()>;
+};
+
+template <class T>
+    requires StaticReflectable<T>
+constexpr auto static_fields() {
+    return reflect_fields(std::type_identity<std::remove_cvref_t<T>>{});
+}
 
 template <class T>
     requires Reflectable<T>

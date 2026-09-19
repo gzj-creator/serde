@@ -22,20 +22,38 @@ benchmark/run.sh --iterations 10000 --warmup 3
 
 The script reads `benchmark/data/config.json` and
 `benchmark/data/config.toml` by default. Pass `--json` and `--toml` to use
-other files. Input loading and fixture construction happen outside the timed
+other files. Both scripts select binaries using the fingerprint reported by
+the release build, so a newer debug build cannot be selected.
+Input loading and fixture construction happen outside the timed
 region. Each result reports total time, mean time, operations per second,
 MiB/s, parsed bytes, and a checksum so the compiler cannot discard parsing.
 
-The comparison is end-to-end parsing into a usable representation. serde's
-public API includes typed reflection decoding, so the reference benchmark also
-walks the parsed DOM and accumulates equivalent fields. This is not a claim
-that the libraries have identical feature sets; malformed-input behavior,
-allocation strategy, and schema conversion are separate concerns documented
-in `docs/benchmark-plan.md`.
+The four default tracks perform different work. serde builds an owning typed
+document, while the reference tracks build a DOM and walk selected fields for
+the checksum. simdjson also receives pre-padded input and reuses its parser;
+serde applies its configured document limits and duplicate-key policy. Do not
+interpret their ratio as wrapper overhead alone. Use the supplementary phases
+below to separate parsing, validation, and typed decoding costs.
 
 The benchmark binaries are separate targets; `mcpp test` does not run them.
-Third-party source remains outside this repository and is never copied into
-the serde library.
+toml++ is supplied by the adjacent `tomlplusplus-3.4.0` directory; simdjson is
+vendored in this repository.
+
+For a paired comparison of two release builds, use Node.js 18 or newer:
+
+```sh
+node benchmark/compare.mjs BASELINE_BIN_DIR CANDIDATE_BIN_DIR /tmp/serde-comparison 0
+```
+
+The optional last argument pins each process to that CPU. The script generates
+medium, large, and 4096-key fixtures and also runs `benchmark_serde_json_wide`,
+which decodes 64 reflected fields from reverse-order input. It runs the binaries
+sequentially for five alternating baseline/candidate rounds, checks matching checksums, and
+reports median nanoseconds and speedup for all three phases. Raw samples and
+fixtures remain in the output directory. Neither build should run concurrently
+with the measurements. The 4096-key fixture exercises a map of keys; the
+64-field track measures reflected C++ member lookup. Copy the wide benchmark
+source and target entry into older baseline checkouts before comparing.
 
 ## Phase and allocation profiles
 

@@ -3,6 +3,7 @@
 
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 
 // C++23 没有可移植的成员枚举。字段列表是一个 X-macro，每个成员调用一次，
 // 例如 `#define SERVER_FIELDS(X) X(host) X(port)`。列表本身控制重复，
@@ -23,9 +24,12 @@
                               REFLECT_DETAIL_FIELD_1)(__VA_ARGS__)
 
 #define REFLECT_FIELDS(TYPE, FIELDS) \
-    constexpr auto reflect_fields(const TYPE&) { \
+    constexpr auto reflect_fields(::std::type_identity<TYPE>) { \
         using reflect_type = TYPE; \
         return std::tuple{FIELDS(REFLECT_DETAIL_FIELD)}; \
+    } \
+    constexpr auto reflect_fields(const TYPE&) { \
+        return reflect_fields(::std::type_identity<TYPE>{}); \
     }
 
 // `REFLECT_MEMBERS` 保留为源代码兼容的拼写别名，但其第二个参数现在与
@@ -35,6 +39,7 @@
 
 // 保留为显式空描述符的简洁兼容拼写。
 #define REFLECT_EMPTY(TYPE) \
+    constexpr auto reflect_fields(::std::type_identity<TYPE>) { return std::tuple{}; } \
     constexpr auto reflect_fields(const TYPE&) { return std::tuple{}; }
 
 #endif

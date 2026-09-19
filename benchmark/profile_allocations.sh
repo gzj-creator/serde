@@ -20,17 +20,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-target_dir="$(find "$root_dir/target" -type f -path '*/bin/benchmark_serde_json_alloc' \
-    -perm -111 -printf '%T@ %h\n' | sort -n | tail -1 | cut -d' ' -f2-)"
-if [[ -z "$target_dir" ]]; then
-    "$mcpp_bin" build --profile release
-    target_dir="$(find "$root_dir/target" -type f -path '*/bin/benchmark_serde_json_alloc' \
-        -perm -111 -printf '%T@ %h\n' | sort -n | tail -1 | cut -d' ' -f2-)"
-fi
-if [[ -z "$target_dir" ]]; then
-    printf '%s\n' 'cannot locate allocation benchmark binaries under target/' >&2
-    exit 1
-fi
+source "$root_dir/benchmark/build_release.sh"
+target_dir="$(build_release_dir "$root_dir" "$mcpp_bin")"
 
 fixture_dir="$(mktemp -d /tmp/serde-allocation-profile.XXXXXX)"
 trap 'rm -rf "$fixture_dir"' EXIT

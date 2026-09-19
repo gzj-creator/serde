@@ -451,6 +451,13 @@ inline std::string_view trim(std::string_view text) {
  */
 inline result<void> append_utf8(std::string& output, std::uint32_t code_point);
 
+inline bool bare_key_character(char character) noexcept {
+    return (character >= 'A' && character <= 'Z') ||
+           (character >= 'a' && character <= 'z') ||
+           (character >= '0' && character <= '9') ||
+           character == '_' || character == '-';
+}
+
 /**
  * @brief 解析单个 TOML 键并返回其实际名称。
  *
@@ -551,10 +558,7 @@ inline result<std::string> parseKey(std::string_view raw_key) {
     }
 
     for (const char character : key) {
-        if (!((character >= 'A' && character <= 'Z') ||
-              (character >= 'a' && character <= 'z') ||
-              (character >= '0' && character <= '9') ||
-              character == '_' || character == '-')) {
+        if (!bare_key_character(character)) {
             return std::unexpected(std::string("invalid bare TOML key: ") +
                                    std::string(key));
         }
@@ -1234,11 +1238,6 @@ private:
     }
 
     result<Node> parseValueImpl() {
-        skip_space();
-        if (position_ >= text_.size()) {
-            return std::unexpected(std::string("missing TOML value"));
-        }
-
         switch (text_[position_]) {
             case '"':
                 return starts_with("\"\"\"") ? parseMultilineBasicString()
@@ -1950,6 +1949,29 @@ private:
      * @return 赋值成功时返回成功结果，否则返回语法或键冲突错误。
      */
     result<void> parse_assignment(Node::table& current_table) {
+        std::size_t key_end = position_;
+        while (key_end < text_.size() && bare_key_character(text_[key_end])) {
+            ++key_end;
+        }
+        const std::size_t bare_equals = skip_toml_space(text_, key_end, false);
+        if (key_end != position_ && bare_equals < text_.size() &&
+            text_[bare_equals] == '=') {
+            // The key limit includes whitespace before '=' on the general path.
+            if (bare_equals - position_ > options_.max_key_bytes ||
+                options_.max_depth == 0) {
+                return std::unexpected(std::string("TOML key exceeds configured size limit"));
+            }
+            const auto key = text_.substr(position_, key_end - position_);
+            auto value = parse_assignment_value(bare_equals);
+            if (!value) {
+                return std::unexpected(value.error());
+            }
+            if (!current_table.emplace(key, std::move(*value)).second) {
+                return std::unexpected(std::string("duplicate or conflicting TOML key"));
+            }
+            return {};
+        }
+
         const std::size_t equals = find_assignment();
         if (equals == std::string_view::npos) {
             return std::unexpected(std::string("expected '=' in TOML assignment"));
@@ -1959,6 +1981,17 @@ private:
             return std::unexpected(path ? std::string("empty TOML key")
                                          : path.error());
         }
+        auto value = parse_assignment_value(equals);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        if (!insertValueAt(current_table, *path, std::move(*value))) {
+            return std::unexpected(std::string("duplicate or conflicting TOML key"));
+        }
+        return {};
+    }
+
+    result<Node> parse_assignment_value(std::size_t equals) {
         position_ = equals + 1;
         position_ = skip_toml_space(text_, position_, false);
         if (position_ >= text_.size() || text_[position_] == '\n' ||
@@ -1975,10 +2008,7 @@ private:
         if (!finished) {
             return std::unexpected(finished.error());
         }
-        if (!insertValueAt(current_table, *path, std::move(*value))) {
-            return std::unexpected(std::string("duplicate or conflicting TOML key"));
-        }
-        return {};
+        return value;
     }
 
     /**
@@ -2312,10 +2342,7 @@ inline bool bareKey(std::string_view key) {
         return false;
     }
     for (const char character : key) {
-        if (!((character >= 'A' && character <= 'Z') ||
-              (character >= 'a' && character <= 'z') ||
-              (character >= '0' && character <= '9') ||
-              character == '_' || character == '-')) {
+        if (!bare_key_character(character)) {
             return false;
         }
     }

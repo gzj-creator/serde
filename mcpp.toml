@@ -28,6 +28,10 @@ main = "benchmark/serde_json.cpp"
 kind = "bin"
 main = "benchmark/serde_json_alloc.cpp"
 
+[targets.benchmark_serde_json_wide]
+kind = "bin"
+main = "benchmark/serde_json_wide.cpp"
+
 [targets.benchmark_simdjson]
 kind = "bin"
 main = "benchmark/simdjson.cpp"

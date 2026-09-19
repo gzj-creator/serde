@@ -25,13 +25,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$root_dir"
-"$mcpp_bin" build --profile release
-
-target_dir="$(find target -type f -path '*/bin/benchmark_serde_json' -perm -111 -printf '%T@ %h\n' | sort -n | tail -1 | cut -d' ' -f2-)"
-if [[ -z "$target_dir" ]]; then
-    printf '%s\n' 'cannot locate release benchmark binaries under target/' >&2
-    exit 1
-fi
+source "$root_dir/benchmark/build_release.sh"
+target_dir="$(build_release_dir "$root_dir" "$mcpp_bin")"
 
 args=(--iterations "$iterations" --warmup "$warmup")
 if [[ -n "$csv_file" ]]; then

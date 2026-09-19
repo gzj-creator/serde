@@ -59,6 +59,76 @@ struct OptionalValue {
 REFLECT_FIELDS(OptionalValue, OPTIONAL_FIELDS)
 #undef OPTIONAL_FIELDS
 
+struct wide_record {
+    int f00{}, f01{}, f02{}, f03{}, f04{}, f05{}, f06{}, f07{}, f08{}, f09{};
+    int f10{}, f11{}, f12{}, f13{}, f14{}, f15{}, f16{}, f17{}, f18{}, f19{};
+    std::optional<int> note = 42;
+};
+
+#define WIDE_FIELDS(X) \
+    X(f00) X(f01) X(f02) X(f03) X(f04) X(f05) X(f06) X(f07) X(f08) X(f09) \
+    X(f10) X(f11) X(f12) X(f13) X(f14) X(f15) X(f16) X(f17) X(f18) X(f19) X(note)
+REFLECT_FIELDS(wide_record, WIDE_FIELDS)
+
+struct static_alias_record : wide_record {};
+#define STATIC_ALIAS_FIELDS(X) WIDE_FIELDS(X) X(f18, "unknown71") X(f19, "f00")
+REFLECT_FIELDS(static_alias_record, STATIC_ALIAS_FIELDS)
+#undef STATIC_ALIAS_FIELDS
+#undef WIDE_FIELDS
+
+struct runtime_macro_record {
+    int first{}, second{}, third{}, fourth{}, fifth{};
+};
+
+std::string macro_field_name = "before";
+#define RUNTIME_MACRO_FIELDS(X) \
+    X(first, macro_field_name) X(second) X(third) X(fourth) X(fifth)
+REFLECT_FIELDS(runtime_macro_record, RUNTIME_MACRO_FIELDS)
+#undef RUNTIME_MACRO_FIELDS
+
+struct const_record {
+    const int value = 1;
+};
+
+#define CONST_FIELDS(X) X(value)
+REFLECT_FIELDS(const_record, CONST_FIELDS)
+#undef CONST_FIELDS
+
+struct shared_name {
+    int left{};
+    int right{};
+};
+
+auto reflect_fields(const shared_name&) {
+    return std::tuple{json::make_field("value", &shared_name::left),
+                      json::make_field("value", &shared_name::right)};
+}
+
+struct runtime_record {
+    std::array<int, 20> values{};
+};
+
+struct runtime_field {
+    std::string name;
+    std::size_t index;
+    int& get(runtime_record& value) const { return value.values[index]; }
+};
+
+std::string runtime_prefix = "before";
+
+auto reflect_fields(const runtime_record&) {
+    std::array<runtime_field, 20> descriptors;
+    for (std::size_t index = 0; index < descriptors.size(); ++index) {
+        descriptors[index] = {runtime_prefix + std::to_string(index), index};
+    }
+    return descriptors;
+}
+
+bool expect(bool condition, std::string_view name) {
+    if (!condition) std::println("test_json: {}", name);
+    return condition;
+}
+
 template <class T>
 bool expect_error(const json::result<T>& value, std::string_view fragment,
                   std::string_view name) {
@@ -68,6 +138,34 @@ bool expect_error(const json::result<T>& value, std::string_view fragment,
     std::println("test_json: {}: {}", name,
                  value ? "unexpected success" : value.error());
     return false;
+}
+
+std::string numbered_object(std::size_t count, bool duplicate = false,
+                            bool escaped = false) {
+    std::string text = "{";
+    for (std::size_t index = 0; index < count; ++index) {
+        if (index != 0) text += ',';
+        text += '"';
+        if (duplicate && index + 1 == count) text += escaped ? "\\u006b0" : "k0";
+        else text += "k" + std::to_string(index);
+        text += "\":" + std::to_string(index);
+    }
+    return text + '}';
+}
+
+std::string reflected_object(std::string_view prefix, std::size_t count,
+                             bool padded = false, std::string_view extra = {}) {
+    std::string text = "{";
+    for (std::size_t remaining = count; remaining != 0; --remaining) {
+        const auto index = remaining - 1;
+        if (remaining != count) text += ',';
+        text += '"';
+        text += prefix;
+        if (padded && index < 10) text += '0';
+        text += std::to_string(index) + "\":" + std::to_string(index);
+    }
+    text += extra;
+    return text + '}';
 }
 
 }  // namespace
@@ -133,6 +231,84 @@ int main() {
                            "integer", "type mismatch");
     const auto null_optional = json::deserialize<OptionalValue>(R"({"value":null})");
     passed &= null_optional && !null_optional->value;
+
+    for (const auto count : {16UZ, 17UZ, 4096UZ}) {
+        const auto unique = json::parse(numbered_object(count));
+        passed &= expect(unique && unique->size() == count, "unique object around duplicate-key threshold");
+        for (const bool escaped : {false, true}) {
+            const auto source = numbered_object(count, true, escaped);
+            passed &= expect_error(json::parse(source), "duplicate object key", "duplicate object keys");
+            const auto accepted = json::parse(source, first_wins);
+            passed &= expect(accepted && accepted->at("k0").as_int64() &&
+                                 *accepted->at("k0").as_int64() == 0,
+                             "duplicate keys retain the first value");
+            const auto ignored = "{\"value\":1,\"ignored\":" + source + '}';
+            passed &= expect_error(json::deserialize<required>(ignored), "duplicate object key",
+                                   "duplicates in ignored objects are rejected");
+        }
+    }
+
+    json::ParseOptions duplicate_only;
+    duplicate_only.enforce_document_limits = false;
+    passed &= expect_error(json::parse(numbered_object(17, true, true), duplicate_only),
+                           "duplicate object key", "duplicate policy without document limits");
+    json::ParseOptions wide_limit;
+    wide_limit.max_object_members = 16;
+    passed &= expect_error(json::parse(numbered_object(17), wide_limit), "member count",
+                           "wide object member limit");
+    wide_limit = {};
+    wide_limit.max_nodes = 17;
+    passed &= expect_error(json::parse(numbered_object(17), wide_limit), "node count",
+                           "wide object node limit");
+
+    const auto reversed_source = reflected_object("f", 20, true);
+    const auto reversed = json::deserialize<wide_record>(reversed_source, strict);
+    passed &= expect(reversed && reversed->f00 == 0 && reversed->f19 == 19 &&
+                         reversed->note == 42,
+                     "reordered reflected fields and missing optional default");
+    const auto reflected_null = json::deserialize<wide_record>(
+        reflected_object("f", 20, true, ",\"note\":null"), strict);
+    passed &= expect(reflected_null && !reflected_null->note, "wide reflected optional null");
+    auto strict_first_wins = strict;
+    strict_first_wins.duplicate_keys = json::DuplicateKeyPolicy::first_wins;
+    const auto reflected_duplicate = json::deserialize<wide_record>(
+        reflected_object("f", 20, true, ",\"f19\":\"ignored\""), strict_first_wins);
+    passed &= expect(reflected_duplicate && reflected_duplicate->f19 == 19,
+                     "reordered reflected first-wins value");
+    const auto static_aliases = json::deserialize<static_alias_record>(
+        reflected_object("f", 20, true, ",\"unknown71\":71,\"f00\":\"ignored\""), strict_first_wins);
+    passed &= expect(static_aliases && static_aliases->f18 == 71 && static_aliases->f19 == 0,
+                     "static field hash collisions and duplicate descriptor names");
+    passed &= expect_error(json::deserialize<wide_record>(reflected_object("f", 19, true), strict),
+                           "value is missing field 'f19'", "indexed missing required field");
+    passed &= expect_error(json::deserialize<wide_record>(
+                               reflected_object("f", 20, true, ",\"unknown\":1"), strict),
+                           "value contains unknown field 'unknown'", "indexed unknown field");
+    passed &= expect_error(json::deserialize<wide_record>(R"({"f19":"bad","f00":"bad","unknown":1})", strict),
+                           "value.f00 must be a JSON integer", "descriptor-order error precedence");
+    passed &= expect_error(json::deserialize<std::vector<wide_record>>(
+                               '[' + reflected_object("f", 19, true) + ']'),
+                           "value[0] is missing field 'f19'", "indexed nested error path");
+    const auto shared = json::deserialize<shared_name>(R"({"value":7,"value":8})", strict_first_wins);
+    passed &= expect(shared && shared->left == 7 && shared->right == 7,
+                     "duplicate descriptor names read the same first value");
+    const auto runtime_before = json::deserialize<runtime_record>(reflected_object("before", 20), strict);
+    runtime_prefix = "after";
+    const auto runtime_after = json::deserialize<runtime_record>(reflected_object("after", 20), strict);
+    passed &= expect(runtime_before && runtime_after && runtime_before->values[19] == 19 &&
+                         runtime_after->values[19] == 19,
+                     "runtime reflected names are rebuilt for every decode");
+    static_assert(reflect::StaticReflectable<wide_record>);
+    static_assert(!reflect::StaticReflectable<runtime_macro_record>);
+    const auto macro_before = json::deserialize<runtime_macro_record>(
+        R"({"before":1,"second":2,"third":3,"fourth":4,"fifth":5})", strict);
+    macro_field_name = "after";
+    const auto macro_after = json::deserialize<runtime_macro_record>(
+        R"({"after":6,"second":2,"third":3,"fourth":4,"fifth":5})", strict);
+    passed &= expect(macro_before && macro_after && macro_before->first == 1 && macro_after->first == 6,
+                     "macro runtime field names are not cached");
+    passed &= expect_error(json::deserialize<const_record>(R"({"value":2})"),
+                           "field 'value' is not assignable", "nonassignable reflected member");
 
     json::ParseOptions limited;
     limited.max_array_items = 2;

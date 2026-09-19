@@ -117,6 +117,135 @@ bool expect(bool condition, std::string_view message) {
     return condition;
 }
 
+template <class T>
+bool expect_error(const toml::result<T>& parsed, std::string_view error,
+                  std::string_view message) {
+    if (!parsed && parsed.error() == error) {
+        return true;
+    }
+    std::println("test_toml_edges: {} (got: {})", message,
+                 parsed ? "unexpected success" : parsed.error());
+    return false;
+}
+
+bool test_assignments() {
+    using Integers = std::map<std::string, int>;
+    using Tables = std::map<std::string, Integers>;
+    bool passed = true;
+    constexpr std::string_view key_limit = "TOML key exceeds configured size limit";
+
+    const auto bare = toml::deserialize<Integers>(
+        "AZaz09_-=1\n0=2\n_=3\n-=4");
+    passed &= expect(bare && *bare == Integers{{"AZaz09_-", 1}, {"0", 2},
+                                               {"_", 3}, {"-", 4}},
+                     "bare keys accept every ASCII character class and end of input");
+
+    for (const auto length : {1, 15, 16, 17, 31, 32, 33, 127, 4096}) {
+        const std::string key(length, 'k');
+        for (const std::string spaces : {std::string{}, std::string(" \t"),
+                                         std::string(33, ' ')}) {
+            const std::string input = " \t" + key + spaces + "=\t 7 # comment\r\n";
+            toml::ParseOptions limits;
+            limits.max_key_bytes = key.size() + spaces.size();
+            const auto parsed = toml::deserialize<Integers>(input, limits);
+            passed &= expect(parsed && *parsed == Integers{{key, 7}},
+                             "bare key byte limit includes trailing whitespace, not indentation");
+            --limits.max_key_bytes;
+            passed &= expect_error(toml::deserialize<Integers>(input, limits), key_limit,
+                                   "bare keys reject one raw byte above the configured limit");
+        }
+    }
+
+    const auto quoted = toml::deserialize<Integers>(
+        "\"a.b=c\" = 1\n'c.d=e' = 2\n\"escaped\\\".=name\" = 3\n\"\"=4\n");
+    passed &= expect(quoted && *quoted == Integers{{"a.b=c", 1}, {"c.d=e", 2},
+                                                   {"escaped\".=name", 3}, {"", 4}},
+                     "quoted keys preserve dots, equals signs, escaped quotes and empty names");
+    const Tables expected{{"root", {{"child", 1}, {"dot.=key", 2}, {"other", 3}}}};
+    const auto dotted = toml::deserialize<Tables>(
+        "root . child = 1\nroot.\"dot.=key\"=2\nroot.other=3\n");
+    const auto table = toml::deserialize<Tables>(
+        "[root]\nchild=1\n\"dot.=key\"=2\nother=3\n");
+    passed &= expect(dotted && table && *dotted == expected && *table == expected,
+                     "dotted fallback and bare assignments in the current table agree");
+
+    const auto nested = toml::deserialize<std::map<std::string, std::vector<Integers>>>(
+        "rows = [\n # row values\n { value = \t 1 },\n { value=2 },\n]\n");
+    passed &= expect(nested && nested->at("rows") ==
+                         std::vector<Integers>{{{"value", 1}}, {{"value", 2}}},
+                     "nested values retain their whitespace and newline handling");
+
+    const std::pair<std::string_view, std::string_view> malformed[] = {
+        {"=1", "empty TOML key"},
+        {"a b=1", "invalid bare TOML key: a b"},
+        {"a?=1", "invalid bare TOML key: a?"},
+        {"a\"b\"=1", "invalid bare TOML key: a\"b\""},
+        {"a..b=1", "empty TOML key"},
+        {"a . =1", "empty TOML key"},
+        {"a#=1", "expected '=' in TOML assignment"},
+        {"a\n=1", "expected '=' in TOML assignment"},
+        {"a\r=1", "expected '=' in TOML assignment"},
+        {"a\t", "expected '=' in TOML assignment"},
+        {"\"a.b=c=1", "expected '=' in TOML assignment"},
+        {"a=", "missing TOML value"},
+        {"a= \t", "missing TOML value"},
+        {"a=\n1", "missing TOML value"},
+        {"a=\r\n1", "missing TOML value"},
+        {"a=# comment", "empty TOML atom"},
+        {"a==1", "invalid TOML number"},
+        {"a=[1] extra", "unexpected characters after TOML assignment"},
+        {"a='x' extra", "unexpected characters after TOML assignment"},
+        {"a=1\na=", "missing TOML value"},
+        {"a=1\na=[2] extra", "unexpected characters after TOML assignment"},
+    };
+    for (const auto& [input, error] : malformed) {
+        passed &= expect_error(toml::deserialize<Integers>(input), error,
+                               "malformed assignments retain their diagnostics");
+    }
+    for (const std::string_view input : {
+             "a=1\na=2", "a=1\n\"a\"=2", "'a'=1\na=2", "a.b=1\na=2",
+             "a=1\na.b=2", "a={b=1}\na.b=2", "[parent]\na=1\na=2"}) {
+        passed &= expect_error(toml::deserialize<Integers>(input),
+                               "duplicate or conflicting TOML key",
+                               "bare and fallback assignments reject duplicate or conflicting keys");
+    }
+
+    toml::ParseOptions limits;
+    limits.max_key_bytes = 7;
+    passed &= expect(toml::deserialize<Integers>("\"a.b=c\"=1", limits).has_value(),
+                     "quoted keys accept the exact raw key byte limit");
+    limits.max_key_bytes = 6;
+    passed &= expect_error(toml::deserialize<Integers>("\"a.b=c\"=1", limits), key_limit,
+                           "quoted keys reject one raw byte above their limit");
+    passed &= expect(toml::deserialize<Tables>("a . b =1", limits).has_value(),
+                     "dotted keys include internal and trailing whitespace in their limit");
+    limits.max_key_bytes = 5;
+    passed &= expect_error(toml::deserialize<Tables>("a . b =1", limits), key_limit,
+                           "dotted keys reject one raw byte above their limit");
+
+    limits = {};
+    limits.max_depth = 0;
+    passed &= expect_error(toml::deserialize<Integers>("a=1", limits), key_limit,
+                           "zero depth rejects a bare key before parsing the value");
+    limits.max_depth = 1;
+    passed &= expect(toml::deserialize<Integers>("a=1", limits).has_value(),
+                     "one depth level accepts a bare scalar assignment");
+    passed &= expect_error(toml::deserialize<Tables>("a.b=1", limits), key_limit,
+                           "dotted keys enforce the component depth limit");
+    passed &= expect_error(toml::deserialize<Integers>("a=[1]", limits),
+                           "TOML nesting depth exceeds configured limit",
+                           "bare assignments still enforce nested value depth");
+    limits.max_depth = 2;
+    passed &= expect(toml::deserialize<Tables>("a.b=1", limits).has_value(),
+                     "dotted keys accept the exact component depth limit");
+    limits = {};
+    limits.max_nodes = 1;
+    passed &= expect_error(toml::deserialize<Integers>("a=1\na=2", limits),
+                           "TOML node count exceeds configured limit",
+                           "value limits are checked before duplicate insertion");
+    return passed;
+}
+
 }  // namespace
 
 int main() {
@@ -169,5 +298,6 @@ int main() {
     passed &= expect(nested && nested->child.grandchildren ==
                          std::vector<NestedGrandchild>{{"first"}, {"second"}},
                      "repeated nested array tables remain appendable");
+    passed &= test_assignments();
     return passed ? 0 : 1;
 }

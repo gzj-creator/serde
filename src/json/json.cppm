@@ -884,6 +884,64 @@ inline std::string memberDecodePath(std::string_view path, std::string_view memb
     return result;
 }
 
+template <class Fields>
+constexpr auto indexedFieldNames(const Fields& descriptors) {
+    constexpr auto field_count = std::tuple_size_v<Fields>;
+    std::array<std::pair<std::string_view, std::size_t>, field_count> names{};
+    std::size_t index = 0;
+    std::apply([&](const auto&... descriptor) {
+        ((names[index] = {descriptor.name, index}, ++index), ...);
+    }, descriptors);
+    std::sort(names.begin(), names.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
+    return names;
+}
+
+template <class T>
+    requires reflect::StaticReflectable<T>
+inline constexpr auto staticFieldNames = indexedFieldNames(reflect::static_fields<T>());
+
+constexpr std::size_t fieldNameHash(std::string_view name) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (const unsigned char character : name) {
+        hash = (hash ^ character) * 1099511628211ULL;
+    }
+    return static_cast<std::size_t>(hash);
+}
+
+template <std::size_t Size>
+struct StaticFieldLookup {
+    static constexpr auto capacity = std::bit_ceil(Size * 2 + 1);
+    std::array<std::size_t, capacity> buckets;
+
+    constexpr explicit StaticFieldLookup(
+        const std::array<std::pair<std::string_view, std::size_t>, Size>& names) {
+        buckets.fill(Size);
+        for (std::size_t index = 0; index < Size; ++index) {
+            if (index != 0 && names[index - 1].first == names[index].first) continue;
+            auto bucket = fieldNameHash(names[index].first) & (capacity - 1);
+            while (buckets[bucket] != Size) bucket = (bucket + 1) & (capacity - 1);
+            buckets[bucket] = index;
+        }
+    }
+
+    constexpr std::size_t find(std::string_view key,
+        const std::array<std::pair<std::string_view, std::size_t>, Size>& names) const {
+        auto bucket = fieldNameHash(key) & (capacity - 1);
+        for (std::size_t probes = 0; probes < capacity; ++probes) {
+            const auto index = buckets[bucket];
+            if (index == Size || names[index].first == key) return index;
+            bucket = (bucket + 1) & (capacity - 1);
+        }
+        return Size;
+    }
+};
+
+template <class T>
+    requires reflect::StaticReflectable<T>
+inline constexpr auto staticFieldLookup = StaticFieldLookup{staticFieldNames<T>};
+
 template <class T>
 result<T> decodeValue(const Json& input, std::string_view path,
                         const ParseOptions& options) {
@@ -1058,17 +1116,53 @@ result<T> decodeValue(const Json& input, std::string_view path,
             return std::unexpected(where + " is not default constructible");
         } else {
             U output{};
+            auto descriptors = reflect::fields(output);
+            constexpr auto field_count = std::tuple_size_v<decltype(descriptors)>;
+            // Small records are faster without a scratch member array.
+            constexpr bool use_index = field_count > 16 ||
+                (field_count == 16 && reflect::StaticReflectable<U>);
+            std::array<Json, use_index ? field_count : 0> members{};
+            if constexpr (use_index) {
+                const auto& names = [&]() -> decltype(auto) {
+                    if constexpr (reflect::StaticReflectable<U>) return (staticFieldNames<U>);
+                    else return indexedFieldNames(descriptors);
+                }();
+                const auto walked = input.for_each_member(
+                    [&](std::string_view key, const Json& child) -> result<void> {
+                        auto found = [&]() {
+                            if constexpr (reflect::StaticReflectable<U>) {
+                                return names.begin() + staticFieldLookup<U>.find(key, names);
+                            } else {
+                                return std::lower_bound(names.begin(), names.end(), key,
+                                    [](const auto& field, std::string_view name) {
+                                        return field.first < name;
+                                    });
+                            }
+                        }();
+                        // Multiple descriptors may intentionally read the same key.
+                        for (; found != names.end() && found->first == key; ++found) {
+                            auto& member = members[found->second];
+                            if (!member.valid()) member = child;
+                        }
+                        return {};
+                    });
+                if (!walked) return std::unexpected(walked.error());
+            }
             bool failed = false;
             std::string failure;
-            for_each_field(output, [&](const auto& descriptor, auto& object) {
+            std::size_t member_index = 0;
+            auto decode_member = [&](const auto& descriptor) {
                 if (failed) return;
-                using Member = BareT<decltype(descriptor.get(object))>;
-                if constexpr (!std::is_assignable_v<decltype(descriptor.get(object)), Member>) {
+                using Member = BareT<decltype(descriptor.get(output))>;
+                if constexpr (!std::is_assignable_v<decltype(descriptor.get(output)), Member>) {
                     failed = true;
                     failure = where + " field '" + std::string(descriptor.name) + "' is not assignable";
                     return;
                 }
-                const auto member = input.at(descriptor.name);
+                const auto& member = [&]() -> decltype(auto) {
+                    if constexpr (use_index) return (members[member_index++]);
+                    else return input.at(descriptor.name);
+                }();
                 if (!member.valid()) {
                     if constexpr (OptionalTraits<Member>::value) return;
                     failed = true;
@@ -1082,14 +1176,26 @@ result<T> decodeValue(const Json& input, std::string_view path,
                         decoded.error(), memberDecodePath(where, descriptor.name));
                     return;
                 }
-                descriptor.get(object) = std::move(*decoded);
-            });
+                if constexpr (std::is_assignable_v<decltype(descriptor.get(output)), Member>) {
+                    descriptor.get(output) = std::move(*decoded);
+                }
+            };
+            std::apply([&](const auto&... descriptor) {
+                (decode_member(descriptor), ...);
+            }, descriptors);
             if (!failed && options.unknown_fields == UnknownFieldPolicy::reject) {
+                // Runtime descriptors may depend on the decoded object.
+                const auto known_descriptors = reflect::fields(output);
+                const auto& known_names = [&]() -> decltype(auto) {
+                    if constexpr (reflect::StaticReflectable<U>) return (staticFieldNames<U>);
+                    else return indexedFieldNames(known_descriptors);
+                }();
                 const auto walked = input.for_each_member([&](std::string_view key, const Json&) -> result<void> {
-                    bool known = false;
-                    std::apply([&](const auto&... descriptor) {
-                        known = ((key == descriptor.name) || ...);
-                    }, reflect::fields(output));
+                    const auto found = std::lower_bound(known_names.begin(), known_names.end(), key,
+                        [](const auto& field, std::string_view name) {
+                            return field.first < name;
+                        });
+                    const bool known = found != known_names.end() && found->first == key;
                     if (!known) {
                         failed = true;
                         failure = where + " contains unknown field '" + std::string(key) + "'";
@@ -1180,7 +1286,7 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
     if (reject_duplicates && member_count > inline_seen_capacity) {
         seen_heap.reserve(member_count);
     }
-    return value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
+    const auto walked = value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
         if (options.enforce_document_limits && key.size() > options.max_key_bytes) {
             return std::unexpected(std::string("JSON object key exceeds configured size limit"));
         }
@@ -1195,13 +1301,7 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
                 }
                 if (!duplicate) seen_inline[seen_count++] = key;
             } else {
-                for (const auto existing : seen_heap) {
-                    if (existing == key) {
-                        duplicate = true;
-                        break;
-                    }
-                }
-                if (!duplicate) seen_heap.push_back(key);
+                seen_heap.push_back(key);
             }
             if (duplicate) {
                 return std::unexpected(std::string("JSON parse error: duplicate object key"));
@@ -1209,6 +1309,14 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
         }
         return enforce_limits(child, options, depth + 1, nodes);
     });
+    if (!walked) return walked;
+    if (!seen_heap.empty()) {
+        std::sort(seen_heap.begin(), seen_heap.end());
+        if (std::adjacent_find(seen_heap.begin(), seen_heap.end()) != seen_heap.end()) {
+            return std::unexpected(std::string("JSON parse error: duplicate object key"));
+        }
+    }
+    return {};
 }
 
 inline Parser& thread_parser() {
@@ -1222,6 +1330,7 @@ export namespace json {
 
 struct Json::State {
     simdjson::dom::parser parser;
+    std::string padded_input;
     std::uint64_t generation = 0;
 };
 
@@ -1249,7 +1358,10 @@ result<Json> Json::parse_with_state(const std::shared_ptr<State>& state,
         }
     }
 
-    auto parsed = state->parser.parse(text.data(), text.size(), true);
+    const auto padded_size = text.size() + simdjson::SIMDJSON_PADDING;
+    state->padded_input.resize(padded_size);
+    std::memcpy(state->padded_input.data(), text.data(), text.size());
+    auto parsed = state->parser.parse(state->padded_input.data(), text.size(), false);
     if (parsed.error()) {
         return std::unexpected(detail::parse_error(parsed.error()));
     }
