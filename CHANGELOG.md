@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-09-19
+
 ### 新增
 
 - 抽出可复用的 `reflect` module 与 `REFLECT_FIELDS` 宏，TOML 和后续 JSON 等序列化器共享同一字段描述符。
@@ -26,6 +28,11 @@
 - 新增 `benchmark/compare.mjs` 脚本，支持对比两个 release 构建的性能差异。
 - 新增 `benchmark/serde_json_wide.cpp`，测试 64 字段结构体的反序列化性能。
 - 新增 TOML 赋值解析快速路径，提取 `bare_key_character()` 和 `parse_assignment_value()` 函数。
+- 新增「实现头 + .cppm 门面」双形态结构：`reflect`/`toml`/`json` 实现全部迁入头文件（`reflect.hpp`/`toml.hpp`/`json.hpp`），经典 TU 直接 include 即可使用，无需模块工具链；`.cppm` 改为薄门面，经 `export extern "C++"` 复发布同名模块。
+- 新增共享 `common` 词汇模块（`serde_common` 模块 / `common::date`、`common::time`、`common::local_date_time`、`common::offset_date_time`、`common::InlineTable`），TOML 与 JSON 经别名（`toml::date`、`json::date` 等）同源暴露。
+- 新增 CMake 安装支持：`CMakeLists.txt` 提供头文件目标 `serde::serde`、simdjson 静态库 `serde::serde_simdjson`、可选 C++23 模块目标 `serde::serde_cpp23_modules`，含 install/export、`serdeConfig.cmake` 包配置与模块文件集；模块门面需 Clang >= 17 / GCC >= 15 + Ninja，不满足时自动退化为纯头文件目标。
+- 新增 Bazel 支持：`MODULE.bazel`、根 `BUILD.bazel` 头文件 target 与 `third_party/simdjson/BUILD.bazel`。
+- 新增 CMake 冒烟测试（头文件与模块两条消费路径）与共享 `module_prelude.hpp` 全局模块片段预置头。
 
 ### 修复
 
@@ -40,6 +47,9 @@
 - 库以 `-fno-exceptions` 构建；JSON/TOML 不再把内存耗尽转成 `expected`，TOML 编解码去掉已失效的 try/catch。
 - `json::detail` 不再随模块导出，对外只保留公开 API。
 - 为 JSON/TOML 的空白符、字符串和 ASCII UTF-8 扫描增加 SSE2 快速路径。
+- 模块实现由纯 `.cppm` 改为「实现头 + `.cppm` 门面」，源码树与安装树保持同一相对布局；非模板外联定义补 `inline`，避免多 TU 包含触发 ODR。
+- `json` 模块不再依赖 `toml` 模块，公共日期时间词汇统一收口到 `common` 模块，两个格式互不依赖。
+- 版本号由 `0.1.0` 升至 `0.2.0`，`mcpp.toml`、`CMakeLists.txt` 与 `MODULE.bazel` 同步更新。
 - 删除 `probes/gcc_reflection.cpp`、`src/reflect/README.md`、`src/toml/README.md` 等不再使用的文件。
 - 删除 `reflect`、`toml`、`json` 的旧拼写兼容别名（`native_reflection_available`、`inline_table`、`parse_options`、`try_serialize`、`deserializee`、`deSerialize` 等），全量重构后统一使用 PascalCase 与标准命名。
 
@@ -48,6 +58,7 @@
 - 记录 GCC 16.1 `std::meta`/`-freflection` 的可行性，以及 GCC BMI、libstdc++/libc++ 与 LLVM 消费边界。
 - 将源码、反射宏、示例、测试和 TOML 样例中的说明性注释统一为中文。
 - 为核心函数、模板函数、解析器、序列化与反序列化 API 以及测试入口补充 Doxygen 规范标注。
+- README.md 补充双形态结构、CMake 安装与 Bazel 消费说明。
 
 ### 维护
 
@@ -55,3 +66,4 @@
 - 移除未被其他目标使用的 `demo.common` 示例模块和应用入口 `src/main.cpp`，包以静态库形式交付。
 - 默认构建 profile 改回 debug；release 留给基准测试。
 - 忽略编辑器配置目录和本地生成的编译命令数据库，避免将开发环境文件纳入版本控制。
+- `.gitignore` 增加 `build/`，排除 CMake 构建产物。

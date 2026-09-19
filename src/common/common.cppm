@@ -2,8 +2,8 @@ module;
 
 #include "../module_prelude.hpp"
 
-export module reflect;
+export module serde_common;
 
 export extern "C++" {
-#include "reflect.hpp"
+#include "common.hpp"
 }

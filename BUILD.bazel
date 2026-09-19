@@ -1,0 +1,19 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# 经典 TU 消费路径：实现头 + 注册宏。src/ 下的 .cppm 门面无法用
+# rules_cc 0.1.1 编译，Bazel 消费者通过头文件使用 serde；CMake 与 mcpp
+# 另行提供 `import reflect/toml/json` 门面。
+cc_library(
+    name = "serde",
+    hdrs = glob(["src/**/*.hpp"]),
+    strip_include_prefix = "src",
+    include_prefix = "serde",
+    copts = ["-std=c++23", "-fno-exceptions"],
+    defines = [
+        "SIMDJSON_EXCEPTIONS=0",
+        "nssv_CONFIG_NO_EXCEPTIONS=1",
+    ],
+    deps = ["//third_party/simdjson:simdjson"],
+)
