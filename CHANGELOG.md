@@ -13,7 +13,7 @@
 
 ### 新增
 
-- 抽出可复用的 `reflect` module 与 `REFLECT_*` 宏，TOML 和后续 JSON 等序列化器共享同一字段描述符。
+- 抽出可复用的 `reflect` module 与 `REFLECT_FIELDS` 宏，TOML 和后续 JSON 等序列化器共享同一字段描述符。
 - 增加 `json` module，复用反射字段描述，提供 RFC 8259 编解码、资源限制和测试；解析后端为内置 simdjson。
 - 移除 TOML 专用 `toml_reflect.hpp` 和 `TOML_REFLECT_*` 兼容入口，统一使用通用反射接口。
 - 增加嵌套数组表、严格数字词法、重复表定义、内联表重开、UTF-8/控制字符和 GCC 16.1 静态反射探针测试。
@@ -21,6 +21,11 @@
 - 新增 JSON 解析器边界回归测试与 TOML 解析器边界回归测试。
 - 新增 `json::Parser::reset` 与 `json::reset_thread_parser()`，用于释放复用 parser 的容量并作废旧文档。
 - 新增项目级 README.md 与 docs/ 文档目录（含 json、reflect、toml 模块说明）。
+- 新增 `reflect::StaticReflectable` 概念和 `static_fields<T>()` 接口，支持编译期字段名校验。
+- 新增 JSON 反序列化静态字段查找表（`StaticFieldLookup`）和 FNV-1a 哈希函数，优化大型结构体的反序列化性能。
+- 新增 `benchmark/compare.mjs` 脚本，支持对比两个 release 构建的性能差异。
+- 新增 `benchmark/serde_json_wide.cpp`，测试 64 字段结构体的反序列化性能。
+- 新增 TOML 赋值解析快速路径，提取 `bare_key_character()` 和 `parse_assignment_value()` 函数。
 
 ### 修复
 
