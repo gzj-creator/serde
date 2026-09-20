@@ -5,3 +5,4 @@ build/
 compile_commands.json
 docs/plans
 .claude/
+/test/mcpp_consumer/mcpp.lock

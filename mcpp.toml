@@ -1,6 +1,6 @@
 [package]
 name        = "serde"
-version     = "0.2.0"
+version     = "0.2.1"
 description = "A modular C++26 package"
 license     = "Apache-2.0"
 standard    = "c++23"
@@ -15,6 +15,7 @@ path = "src/json/json.cppm"
 default-profile = "debug"
 dialect_cxxflags = ["-fno-exceptions"]
 sources = ["src/**/*.cppm", "third_party/simdjson/simdjson.cpp"]
+include_dirs = ["include", "."]
 defines = ["SIMDJSON_EXCEPTIONS=0", "nssv_CONFIG_NO_EXCEPTIONS=1"]
 
 [targets.serde]

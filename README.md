@@ -8,7 +8,7 @@ C++ 序列化库，提供 TOML 和 JSON 编解码。JSON 解析由项目内的 s
 - **编译器无关**：基于编译器无关的反射模块，支持 LLVM/Clang 和 GCC
 - **确定性序列化**：输出格式规范、可预测
 - **资源限制**：默认校验字节、深度、节点、字符串和容器上限；可用 `enforce_document_limits = false` 关闭整树校验
-- **C++23**：语法和限制错误走 `std::expected`。库以 `-fno-exceptions` 构建，内存耗尽会终止进程
+- **C++23**：语法和限制错误走 `std::expected`。CMake 消费方保留自身异常编译策略；mcpp 独立开发默认 `-fno-exceptions`，此时内存耗尽会终止进程
 
 ## 模块
 
@@ -85,6 +85,12 @@ mcpp build            # 模块形态，默认 LLVM 22.1.8 工具链 + debug prof
 mcpp test             # 全部 9 个测试
 mcpp build --profile release   # 基准测试请用 release 或 benchmark/run.sh
 ```
+
+作为依赖时，`include/serde` 提供与 CMake/Bazel 相同的头文件路径，
+如 `<serde/reflect/reflect_macros.hpp>`；simdjson 的公开路径是
+`<third_party/simdjson/simdjson.h>`。模块与消费方必须采用相同异常编译策略。
+
+依赖消费回归测试：在 `test/mcpp_consumer` 下运行 `mcpp build` 和 `mcpp run`。
 
 ### CMake（可安装）
 

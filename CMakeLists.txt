@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(serde VERSION 0.2.0 LANGUAGES C CXX)
+project(serde VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -66,6 +66,8 @@ target_compile_definitions(serde_simdjson PUBLIC
 )
 target_include_directories(serde_simdjson
     PUBLIC
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/simdjson>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/third_party/simdjson>
 )
@@ -76,9 +78,8 @@ target_include_directories(serde_simdjson
 add_library(serde INTERFACE)
 add_library(serde::serde ALIAS serde)
 target_compile_features(serde INTERFACE cxx_std_23)
-# 库以 -fno-exceptions 构建（mcpp.toml 同），异常配置必须向消费方传播，
-# 否则模块消费者加载 BMI 时触发 module-file-config-mismatch。
-target_compile_options(serde INTERFACE -fno-exceptions)
+# Header consumers retain their own exception policy. Parse/validation errors
+# still use std::expected, and the simdjson backend remains exception-free.
 target_include_directories(serde
     INTERFACE
         $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/include>
@@ -125,9 +126,8 @@ if(SERDE_CPP23_MODULES_EFFECTIVE)
         target_compile_options(serde-cpp23-modules PUBLIC -std=c++23)
     endif()
     target_compile_features(serde-cpp23-modules PUBLIC cxx_std_23)
-    # -fno-exceptions 必须向模块消费方传播，否则 TU 加载 -fno-exceptions 的 BMI
-    # 时触发 module-file-config-mismatch。
-    target_compile_options(serde-cpp23-modules PUBLIC -fno-exceptions)
+    # Build interfaces with the parent project's exception policy so they can
+    # coexist with its other BMIs. Do not force a graph-wide dialect change.
     target_compile_definitions(serde-cpp23-modules PUBLIC
         SIMDJSON_EXCEPTIONS=0
         nssv_CONFIG_NO_EXCEPTIONS=1
