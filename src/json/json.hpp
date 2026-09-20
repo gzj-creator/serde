@@ -15,7 +15,12 @@
 #ifndef nssv_CONFIG_NO_EXCEPTIONS
 #define nssv_CONFIG_NO_EXCEPTIONS 1
 #endif
+// Bazel exposes dependencies through separate virtual include directories.
+#if __has_include(<third_party/simdjson/simdjson.h>)
+#include <third_party/simdjson/simdjson.h>
+#else
 #include "../../third_party/simdjson/simdjson.h"
+#endif
 
 #include <algorithm>
 #include <array>

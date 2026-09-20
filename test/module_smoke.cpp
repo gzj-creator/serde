@@ -1,12 +1,13 @@
 // 模块门面冒烟：json 与 toml 相互独立（各经 export import 复发布
 // reflect/serde_common），同一 TU 内可同时导入。
-import json;
-import toml;
-
 #include <cassert>
 #include <optional>
 #include <string>
 #include <vector>
+
+// GCC needs standard headers before imports to merge their declarations.
+import json;
+import toml;
 
 #include <serde/reflect/reflect_macros.hpp>
 

@@ -8,6 +8,26 @@
 - Git 提交消息：`feat: 模块改为实现头+门面双形态，新增 CMake 安装与 Bazel 支持`
 - git tag：`v0.2.0`
 
+## v0.2.1 - 2026-09-20
+
+- 版本级别：小版本（trivial）
+- Git 提交消息：`feat: simdjson 后端支持共享库链接并新增冒烟测试`
+- git tag：`v0.2.1`
+
+### 摘要
+
+自 `v0.2.0` 以来的累计变更：
+
+- **共享库链接支持**：`serde_simdjson` 后端改为启用 PIC 的库，可通过
+  `-DSERDE_BUILD_SHARED_LIBS=ON` 构建为共享库；Windows 上自动带上
+  `SIMDJSON_BUILDING/USING_WINDOWS_DYNAMIC_LIBRARY` 相关宏。
+- **共享库冒烟测试**：新增 `test/shared_consumer.cpp` 与 `test/shared_smoke.cpp`，
+  覆盖静态库与共享库两种构建下把后端链接进下游共享库的路径。
+- **Bazel 测试入口**：新增 `//:header_smoke` 目标，支持 `bazel test` 冒烟验证。
+- **构建兼容性**：`src/json/json.hpp` 用 `__has_include` 探测 simdjson 头文件，
+  兼容 Bazel 虚拟 include 目录；`test/module_smoke.cpp` 调整 include/import 顺序以兼容 GCC。
+- **文档**：README 补充后端 PIC / 共享库构建说明与 Bazel 测试用法。
+
 ### 摘要
 
 首个可安装版本的累计变更：

@@ -11,6 +11,32 @@
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-09-20
+
+### 新增
+
+- 支持把 simdjson 后端链接进共享库：`serde_simdjson` 改为启用 PIC 的库，
+  可通过 `-DSERDE_BUILD_SHARED_LIBS=ON` 构建为共享库，并在 Windows 上自动带上
+  `SIMDJSON_BUILDING/USING_WINDOWS_DYNAMIC_LIBRARY` 相关宏。
+- 新增共享库消费冒烟测试（`test/shared_consumer.cpp` 与 `test/shared_smoke.cpp`），
+  覆盖静态库与共享库两种构建下把后端链接进下游共享库的路径。
+- Bazel 新增 `//:header_smoke` 测试目标（`cc_test`），提供 `bazel test` 冒烟入口。
+
+### 变更
+
+- `src/json/json.hpp` 对 simdjson 头文件采用 `__has_include` 探测，兼容 Bazel
+  以虚拟 include 目录暴露依赖的情况。
+- `test/module_smoke.cpp` 将标准库头文件提前到 `import` 之前，兼容 GCC 的
+  include/import 声明合并要求。
+
+### 文档
+
+- README.md 补充 simdjson 后端 PIC / 共享库构建说明与 `bazel test //:header_smoke` 用法。
+
+### 维护
+
+- `BUILD.bazel`、`CMakeLists.txt` 与 `test/CMakeLists.txt` 补充文件末尾换行。
+
 ## [v0.2.0] - 2026-09-19
 
 ### 新增

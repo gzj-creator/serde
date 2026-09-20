@@ -98,10 +98,17 @@ cmake --install build --prefix /your/prefix
 模块门面需要模块工具链（Clang >= 17 / GCC >= 15 + Ninja/VS），不满足时
 CMake 自动退化为纯头文件目标（`-DSERDE_BUILD_CPP23_MODULES=OFF` 可强制关闭）。
 
+simdjson 后端默认构建为启用 PIC 的静态库，也可链接到下游共享库。
+`-DSERDE_BUILD_SHARED_LIBS=ON` 将后端构建为共享库。
+
 ### Bazel
 
 `BUILD.bazel` 提供 `//:serde` 头文件 target；`//third_party/simdjson:simdjson`
 提供 JSON 后端。`.cppm` 门面无法用 rules_cc 0.1.1 编译，Bazel 消费者走头文件。
+
+```bash
+bazel test //:header_smoke
+```
 
 ## 消费方式
 

@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -16,4 +16,11 @@ cc_library(
         "nssv_CONFIG_NO_EXCEPTIONS=1",
     ],
     deps = ["//third_party/simdjson:simdjson"],
+)
+
+cc_test(
+    name = "header_smoke",
+    srcs = ["test/header_smoke.cpp"],
+    copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
+    deps = [":serde"],
 )

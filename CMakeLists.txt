@@ -48,8 +48,16 @@ file(CREATE_LINK
 # ---------------------------------------------------------------------------
 # simdjson 后端
 # ---------------------------------------------------------------------------
-add_library(serde_simdjson STATIC third_party/simdjson/simdjson.cpp)
+add_library(serde_simdjson third_party/simdjson/simdjson.cpp)
 add_library(serde::serde_simdjson ALIAS serde_simdjson)
+# Static consumers may also link this backend into a shared library.
+set_target_properties(serde_simdjson PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(WIN32 AND SERDE_BUILD_SHARED_LIBS)
+    target_compile_definitions(serde_simdjson
+        PRIVATE SIMDJSON_BUILDING_WINDOWS_DYNAMIC_LIBRARY=1
+        INTERFACE SIMDJSON_USING_WINDOWS_DYNAMIC_LIBRARY=1
+    )
+endif()
 target_compile_features(serde_simdjson PUBLIC cxx_std_17)
 target_compile_options(serde_simdjson PRIVATE -fno-exceptions)
 target_compile_definitions(serde_simdjson PUBLIC
