@@ -883,9 +883,64 @@ inline bool appendValue(const Node& value, Writer& output,
         value.value);
 }
 
+inline bool needs_document_walk(const ParseOptions& options) noexcept;
+
+inline result<void> enforce_limits(const Json& value, const ParseOptions& options,
+                                   std::size_t depth, std::size_t& nodes);
+inline result<void> enforce_contents(const Json& value, const ParseOptions& options,
+                                     std::size_t depth, std::size_t& nodes);
+
+// 小对象在遍历中立即拒绝重复键；大对象先走完子节点，再按键排序判定。
+// 与原先的独立限制遍历保持同一顺序。小对象不分配、也不清零整块缓冲。
+struct DuplicateKeyScan {
+    static constexpr std::size_t inline_capacity = 16;
+    const ParseOptions* options = nullptr;
+    std::size_t member_count = 0;
+    bool reject = false;
+    std::size_t seen_count = 0;
+    std::array<std::string_view, inline_capacity> seen_inline;
+    std::vector<std::string_view> seen_heap;
+
+    explicit DuplicateKeyScan(const ParseOptions& parse_options, std::size_t count)
+        : options(&parse_options), member_count(count),
+          reject(parse_options.duplicate_keys == DuplicateKeyPolicy::reject) {
+        if (reject && count > inline_capacity) seen_heap.reserve(count);
+    }
+
+    result<void> observe(std::string_view key, bool& repeated) {
+        repeated = false;
+        if (options->enforce_document_limits && key.size() > options->max_key_bytes) {
+            return std::unexpected(std::string("JSON object key exceeds configured size limit"));
+        }
+        if (member_count <= inline_capacity) {
+            for (std::size_t index = 0; index < seen_count; ++index) {
+                if (seen_inline[index] == key) {
+                    repeated = true;
+                    if (reject) {
+                        return std::unexpected(std::string("JSON parse error: duplicate object key"));
+                    }
+                    return {};
+                }
+            }
+            seen_inline[seen_count++] = key;
+            return {};
+        }
+        if (reject) seen_heap.push_back(key);
+        return {};
+    }
+
+    result<void> finish() {
+        if (!reject || seen_heap.empty()) return {};
+        std::sort(seen_heap.begin(), seen_heap.end());
+        if (std::adjacent_find(seen_heap.begin(), seen_heap.end()) != seen_heap.end()) {
+            return std::unexpected(std::string("JSON parse error: duplicate object key"));
+        }
+        return {};
+    }
+};
+
 template <class T>
-result<T> decodeValue(const Json& input, std::string_view path,
-                        const ParseOptions& options);
+result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options);
 
 inline std::string rebaseDecodeError(std::string error, std::string_view path);
 inline std::string indexedDecodePath(std::string_view path, std::size_t index);
@@ -893,6 +948,23 @@ inline std::string memberDecodePath(std::string_view path, std::string_view memb
 
 inline std::string valuePath(std::string_view path) {
     return path.empty() ? std::string("value") : std::string(path);
+}
+
+// 成功路径不构造 "value"。只有真正格式化错误时才物化路径。
+struct LazyWhere {
+    std::string_view path;
+    std::string_view view() const {
+        return path.empty() ? std::string_view("value") : path;
+    }
+};
+
+inline std::string operator+(const LazyWhere& where, std::string_view message) {
+    const auto prefix = where.view();
+    std::string out;
+    out.reserve(prefix.size() + message.size());
+    out.append(prefix);
+    out.append(message);
+    return out;
 }
 
 // 递归解码仅在报告错误时需要完整路径。将成功的子调用保持在根路径
@@ -987,10 +1059,9 @@ template <class T>
 inline constexpr auto staticFieldLookup = StaticFieldLookup{staticFieldNames<T>};
 
 template <class T>
-result<T> decodeValue(const Json& input, std::string_view path,
-                        const ParseOptions& options) {
+result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options) {
     using U = BareT<T>;
-    const auto where = valuePath(path);
+    const LazyWhere where{path};
 
     if constexpr (OptionalTraits<U>::value) {
         if (input.is_null()) {
@@ -1003,6 +1074,11 @@ result<T> decodeValue(const Json& input, std::string_view path,
         auto decoded = decodeValue<typename InlineTableTraits<U>::value_type>(input, path, options);
         if (!decoded) return std::unexpected(decoded.error());
         return U{std::move(*decoded)};
+    } else if constexpr (std::is_enum_v<U>) {
+        using Underlying = std::underlying_type_t<U>;
+        auto decoded = decodeValue<Underlying>(input, path, options);
+        if (!decoded) return std::unexpected(decoded.error());
+        return static_cast<U>(*decoded);
     } else if constexpr (std::same_as<U, std::nullptr_t>) {
         if (input.is_null()) return nullptr;
         return std::unexpected(where + " must be JSON null");
@@ -1097,11 +1173,6 @@ result<T> decodeValue(const Json& input, std::string_view path,
             return std::unexpected(where + " is outside the destination floating-point range");
         }
         return converted;
-    } else if constexpr (std::is_enum_v<U>) {
-        using Underlying = std::underlying_type_t<U>;
-        auto decoded = decodeValue<Underlying>(input, path, options);
-        if (!decoded) return std::unexpected(decoded.error());
-        return static_cast<U>(*decoded);
     } else if constexpr (VectorTraits<U>::value) {
         if (!input.is_array()) return std::unexpected(where + " must be a JSON array");
         U output;
@@ -1111,7 +1182,7 @@ result<T> decodeValue(const Json& input, std::string_view path,
         const auto walked = input.for_each_element([&](const Json& child) -> result<void> {
             auto decoded = decodeValue<typename VectorTraits<U>::value_type>(child, {}, options);
             if (!decoded) {
-                failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where, index));
+                failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where.view(), index));
                 return std::unexpected(failure);
             }
             output.push_back(std::move(*decoded));
@@ -1130,7 +1201,7 @@ result<T> decodeValue(const Json& input, std::string_view path,
         const auto walked = input.for_each_element([&](const Json& child) -> result<void> {
             auto decoded = decodeValue<typename ArrayTraits<U>::value_type>(child, {}, options);
             if (!decoded) {
-                failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where, index));
+                failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where.view(), index));
                 return std::unexpected(failure);
             }
             output[index] = std::move(*decoded);
@@ -1146,7 +1217,7 @@ result<T> decodeValue(const Json& input, std::string_view path,
         const auto walked = input.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
             auto decoded = decodeValue<typename MapTraits<U>::mapped_type>(child, {}, options);
             if (!decoded) {
-                failure = rebaseDecodeError(decoded.error(), memberDecodePath(where, key));
+                failure = rebaseDecodeError(decoded.error(), memberDecodePath(where.view(), key));
                 return std::unexpected(failure);
             }
             output.emplace(std::string(key), std::move(*decoded));
@@ -1217,7 +1288,7 @@ result<T> decodeValue(const Json& input, std::string_view path,
                 if (!decoded) {
                     failed = true;
                     failure = rebaseDecodeError(
-                        decoded.error(), memberDecodePath(where, descriptor.name));
+                        decoded.error(), memberDecodePath(where.view(), descriptor.name));
                     return;
                 }
                 if constexpr (std::is_assignable_v<decltype(descriptor.get(output)), Member>) {
@@ -1282,17 +1353,68 @@ inline bool needs_document_walk(const ParseOptions& options) noexcept {
            options.duplicate_keys == DuplicateKeyPolicy::reject;
 }
 
-inline result<void> enforce_limits(const Json& value, const ParseOptions& options,
-                                   std::size_t depth, std::size_t& nodes) {
-    if (options.enforce_document_limits) {
-        if (depth >= options.max_depth) {
-            return std::unexpected(std::string("JSON parse error: nesting depth exceeds configured limit"));
-        }
-        if (nodes++ >= options.max_nodes) {
-            return std::unexpected(std::string("JSON parse error: node count exceeds configured limit"));
-        }
+// 默认限制远大于输入时，字符串、节点、数组和成员上限不可能被触发。
+// 深度由 simdjson 的 max_depth 在解析阶段处理，这里只剩重复键。
+inline bool numeric_limits_implied_by_input(const ParseOptions& options, std::size_t bytes) noexcept {
+    return !options.enforce_document_limits ||
+           (bytes <= options.max_nodes && bytes <= options.max_string_bytes &&
+            bytes <= options.max_key_bytes && bytes <= options.max_array_items &&
+            bytes <= options.max_object_members);
+}
+
+inline result<void> scan_structure(const Json& value, const ParseOptions& options, std::size_t depth,
+                                  bool check_depth, bool reject_duplicates) {
+    if (check_depth && depth >= options.max_depth) {
+        return std::unexpected(std::string("JSON parse error: nesting depth exceeds configured limit"));
+    }
+    const auto type = value.type();
+    if (type == ValueType::array) {
+        return value.for_each_element([&](const Json& child) {
+            return scan_structure(child, options, depth + 1, check_depth, reject_duplicates);
+        });
+    }
+    if (type != ValueType::object) return {};
+    if (!reject_duplicates) {
+        return value.for_each_member([&](std::string_view, const Json& child) {
+            return scan_structure(child, options, depth + 1, check_depth, false);
+        });
     }
 
+    // 16 个以内的键放在栈上，避免每个小对象构造堆缓冲。
+    std::array<std::string_view, DuplicateKeyScan::inline_capacity> seen_inline;
+    std::size_t seen_count = 0;
+    std::optional<std::vector<std::string_view>> seen_heap;
+    const auto walked = value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
+        if (!seen_heap) {
+            for (std::size_t index = 0; index < seen_count; ++index) {
+                if (seen_inline[index] == key) {
+                    return std::unexpected(std::string("JSON parse error: duplicate object key"));
+                }
+            }
+            if (seen_count < seen_inline.size()) seen_inline[seen_count++] = key;
+            else {
+                seen_heap.emplace();
+                seen_heap->reserve(seen_count * 2);
+                seen_heap->insert(seen_heap->end(), seen_inline.begin(), seen_inline.begin() + seen_count);
+                seen_heap->push_back(key);
+            }
+        } else {
+            seen_heap->push_back(key);
+        }
+        return scan_structure(child, options, depth + 1, check_depth, true);
+    });
+    if (!walked) return walked;
+    if (seen_heap) {
+        std::sort(seen_heap->begin(), seen_heap->end());
+        if (std::adjacent_find(seen_heap->begin(), seen_heap->end()) != seen_heap->end()) {
+            return std::unexpected(std::string("JSON parse error: duplicate object key"));
+        }
+    }
+    return {};
+}
+
+inline result<void> enforce_contents(const Json& value, const ParseOptions& options,
+                                     std::size_t depth, std::size_t& nodes) {
     // Read the tape type once. Calling each is_* predicate in sequence repeats
     // the validity and type checks for every scalar in a document.
     const auto type = value.type();
@@ -1319,48 +1441,27 @@ inline result<void> enforce_limits(const Json& value, const ParseOptions& option
         return std::unexpected(std::string("JSON object member count exceeds configured limit"));
     }
 
-    // Most JSON objects are small. Keep their keys in a stack array so the
-    // default duplicate-key check does not allocate a tree node per member.
-    constexpr std::size_t inline_seen_capacity = 16;
-    const bool reject_duplicates =
-        options.duplicate_keys == DuplicateKeyPolicy::reject;
-    std::array<std::string_view, inline_seen_capacity> seen_inline{};
-    std::vector<std::string_view> seen_heap;
-    std::size_t seen_count = 0;
-    if (reject_duplicates && member_count > inline_seen_capacity) {
-        seen_heap.reserve(member_count);
-    }
+    DuplicateKeyScan keys{options, member_count};
     const auto walked = value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
-        if (options.enforce_document_limits && key.size() > options.max_key_bytes) {
-            return std::unexpected(std::string("JSON object key exceeds configured size limit"));
-        }
-        if (reject_duplicates) {
-            bool duplicate = false;
-            if (member_count <= inline_seen_capacity) {
-                for (std::size_t index = 0; index < seen_count; ++index) {
-                    if (seen_inline[index] == key) {
-                        duplicate = true;
-                        break;
-                    }
-                }
-                if (!duplicate) seen_inline[seen_count++] = key;
-            } else {
-                seen_heap.push_back(key);
-            }
-            if (duplicate) {
-                return std::unexpected(std::string("JSON parse error: duplicate object key"));
-            }
-        }
+        bool repeated = false;
+        if (auto observed = keys.observe(key, repeated); !observed) return observed;
         return enforce_limits(child, options, depth + 1, nodes);
     });
     if (!walked) return walked;
-    if (!seen_heap.empty()) {
-        std::sort(seen_heap.begin(), seen_heap.end());
-        if (std::adjacent_find(seen_heap.begin(), seen_heap.end()) != seen_heap.end()) {
-            return std::unexpected(std::string("JSON parse error: duplicate object key"));
+    return keys.finish();
+}
+
+inline result<void> enforce_limits(const Json& value, const ParseOptions& options,
+                                   std::size_t depth, std::size_t& nodes) {
+    if (options.enforce_document_limits) {
+        if (depth >= options.max_depth) {
+            return std::unexpected(std::string("JSON parse error: nesting depth exceeds configured limit"));
+        }
+        if (nodes++ >= options.max_nodes) {
+            return std::unexpected(std::string("JSON parse error: node count exceeds configured limit"));
         }
     }
-    return {};
+    return enforce_contents(value, options, depth, nodes);
 }
 
 inline Parser& thread_parser() {
@@ -1466,8 +1567,34 @@ result<T> decode(const Json& value, const ParseOptions& options = {}) {
 
 template <class T>
 result<T> deserialize(std::string_view text, const ParseOptions& options = {}) {
-    auto parsed = detail::thread_parser().parse(text, options);
+    // 解析阶段不做第二次整篇遍历。深度交给 simdjson；输入放得进各项
+    // 字节/节点上限时，只扫描对象键以拒绝重复键。json::parse 仍走完整检查。
+    ParseOptions parsed_options = options;
+    const bool structural = detail::needs_document_walk(options);
+    if (structural) {
+        parsed_options.enforce_document_limits = false;
+        parsed_options.duplicate_keys = DuplicateKeyPolicy::first_wins;
+    }
+    auto parsed = detail::thread_parser().parse(text, parsed_options);
     if (!parsed) return std::unexpected(parsed.error());
+    if (structural) {
+        const bool limits_implied =
+            detail::numeric_limits_implied_by_input(options, text.size());
+        const bool check_depth = options.enforce_document_limits && text.size() > options.max_depth;
+        if (!limits_implied) {
+            std::size_t nodes = 0;
+            if (auto limited = detail::enforce_limits(*parsed, options, 0, nodes); !limited) {
+                return std::unexpected(limited.error());
+            }
+        } else if (check_depth || options.duplicate_keys == DuplicateKeyPolicy::reject) {
+            if (auto scanned = detail::scan_structure(
+                    *parsed, options, 0, check_depth,
+                    options.duplicate_keys == DuplicateKeyPolicy::reject);
+                !scanned) {
+                return std::unexpected(scanned.error());
+            }
+        }
+    }
     return decode<T>(*parsed, options);
 }
 

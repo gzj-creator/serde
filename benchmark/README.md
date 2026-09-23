@@ -103,3 +103,29 @@ is inferred from timing alone; map/node representation work remains deferred.
 The default four-row command is unchanged. Default JSON `parse-only` measures
 a fresh `json::parse` each iteration. `--reuse-context` switches to a reused
 `json::Parser`. The old bytewise/structural custom parser phases were removed.
+
+## JSON deserialize 结构检查（相对 v0.2.2）
+
+下面的数字不是 `benchmark/run.sh` 的四行输出，而是同一进程里对
+`json::deserialize` 的改前/改后对照。编译器是 clang 22.1.8，选项为
+`-O3 -DNDEBUG -std=c++23 -stdlib=libc++ -fno-exceptions`，并定义
+`SIMDJSON_EXCEPTIONS=0`。计时区间只包含反序列化循环；样本在计时前生成。
+预热 5 次。2 台与 64 字段各 10000 次，200 台 2000 次，2000 台 200 次。
+
+200 台服务器不是仓库里的 `benchmark/data/config.json`（那份只有 2 台，约 380 字节）。
+样本按该文件的文档形状在内存中生成：外层字段保持不变，`servers` 重复 N 次。
+每一项为 `{"host":"cache-<i>","port":<9000+i>,"zones":["cn-sh","us-west"]}`。
+
+| 样本 | 字节 | v0.2.2 平均时间 | 本次平均时间 |
+| --- | ---: | ---: | ---: |
+| 2 台服务器 | 343 | 1481 ns | 1388 ns |
+| 200 台服务器 | 12315 | 73 µs | 49 µs |
+| 2000 台服务器 | 124115 | 528 µs | 485 µs |
+| 64 个整数字段，键序 `f63` 到 `f00` | 567 | 5579 ns | 5579 ns |
+
+默认 `deserialize` 现在的行为是：输入字节数不超过 `max_nodes`、`max_string_bytes`、
+`max_key_bytes`、`max_array_items` 和 `max_object_members` 时，跳过完整的
+`enforce_limits`。仍要拒绝重复键，或输入长于 `max_depth` 时，只扫描对象键和嵌套深度。
+深度仍由解析器的 `max_depth` 与这次扫描共同约束。用户把某项上限收紧到输入放不下时，
+继续走原来的完整检查。`json::parse` 的检查路径没有改变。64 字段整数样本几乎不变，
+因为时间主要在建 DOM 和按字段填结构，不在字符串长度检查上。
