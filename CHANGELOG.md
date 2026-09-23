@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [v0.3.0] - 2026-09-24
+
 ### 新增
 
 - 新增 `json::stream::StreamWriter`，支持通过同步 sink 逐段输出对象、数组、
@@ -27,6 +29,10 @@
 ### 文档
 
 - 在 `benchmark/README.md` 记录相对 `v0.2.2` 的反序列化探针数据。样本按 `config.json` 的形状生成，200 台服务器为 12315 字节，平均时间从 73 µs 降到 49 µs。
+
+### 维护
+
+- 将 `CMakeLists.txt`、`MODULE.bazel` 与 `mcpp.toml` 的包版本声明同步更新为 `0.3.0`。
 
 ## [v0.2.2] - 2026-09-23
 
