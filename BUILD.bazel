@@ -19,6 +19,13 @@ cc_library(
 )
 
 cc_test(
+    name = "json_stream",
+    srcs = ["test/json_stream.cpp", "test/json_stream_cases.hpp"],
+    copts = ["-std=c++23", "-fno-exceptions"],
+    deps = [":serde"],
+)
+
+cc_test(
     name = "header_smoke",
     srcs = ["test/header_smoke.cpp"],
     copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],

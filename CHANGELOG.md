@@ -11,6 +11,14 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 新增 `json::stream::StreamWriter`，支持通过同步 sink 逐段输出对象、数组、
+  标量、经过校验的原始 JSON 和 DOM 子节点；`json::stream::serialize` 可直接
+  遍历 C++ 值，无需构造中间 JSON 树。流式输出保留输入顺序，错误会停止后续
+  输出，支持现有序列化资源限制、pretty 格式和 writer 重置复用。
+- 补充 MCP JSON-RPC 使用示例和头文件 / 模块两条路径的流式输出回归测试。
+
 ### 变更
 
 - JSON `deserialize` 在输入放得进默认节点、字符串、键、数组和成员上限时，不再对整篇 DOM 做完整限制遍历；重复键和可能超深度的文档改为只扫描对象键与嵌套深度。更紧的上限仍走原来的完整检查，`json::parse` 不变。

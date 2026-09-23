@@ -1600,4 +1600,6 @@ result<T> deserialize(std::string_view text, const ParseOptions& options = {}) {
 
 }  // namespace json
 
+#include "stream.hpp"
+
 #endif  // SERDE_JSON_HPP

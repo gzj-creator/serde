@@ -3,6 +3,10 @@ add_executable(serde_header_smoke header_smoke.cpp)
 target_link_libraries(serde_header_smoke PRIVATE serde::serde)
 add_test(NAME serde_header_smoke COMMAND serde_header_smoke)
 
+add_executable(serde_json_stream json_stream.cpp)
+target_link_libraries(serde_json_stream PRIVATE serde::serde)
+add_test(NAME serde_json_stream COMMAND serde_json_stream)
+
 # Exercise backend linkage from a shared library in both static and shared builds.
 add_library(serde_shared_consumer SHARED shared_consumer.cpp)
 set_target_properties(serde_shared_consumer PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

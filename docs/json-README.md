@@ -26,3 +26,97 @@
 现有的 TOML 日期/时间类型通过 `json::date`、`json::time`、`json::local_date_time` 和 `json::offset_date_time` 别名可用。由于 JSON 没有时间原语，它们以经过验证的 ISO/RFC-3339 类 JSON 字符串表示。
 
 序列化是确定性的：对象键按字典序排列。默认输出为紧凑格式；设置 `SerializeOptions::pretty` 可获得缩进输出。非有限 C++ 浮点值默认被拒绝。显式的 `NonFinitePolicy::null_value` 选项可在应用层策略中将其映射为 JSON null。
+
+## 流式输出：`json::stream::StreamWriter`
+
+`json::stream` 提供独立的流式行为。头文件消费者可包含
+`<serde/json/stream.hpp>` 或 `<serde/json/json.hpp>`；模块消费者使用 `import json`。
+
+`StreamWriter` 接受一个同步 sink：`json::result<void>(std::string_view)`。
+每次写入会立即把 JSON 片段交给 sink，不累计完整输出字符串。sink 成功返回时
+必须已消费整个片段；`string_view` 仅在回调期间有效，需要异步发送时应先复制到
+应用自己的发送队列。回调不得重入同一个 writer，也不能修改当前正在序列化的值。
+
+下面的 MCP JSON-RPC 响应示例展示手动写入、typed 值和原始 JSON 的组合：
+
+```cpp
+#include <serde/json/stream.hpp>
+
+json::result<void> write_response(json::stream::StreamWriter::Sink sink,
+                                  std::int64_t id,
+                                  std::string_view text,
+                                  std::string_view structured_json) {
+    json::stream::StreamWriter writer(std::move(sink));
+    if (auto r = writer.start_object(); !r) return r;
+    if (auto r = writer.key("jsonrpc"); !r) return r;
+    if (auto r = writer.string("2.0"); !r) return r;
+    if (auto r = writer.key("id"); !r) return r;
+    if (auto r = writer.number(id); !r) return r;
+    if (auto r = writer.key("result"); !r) return r;
+    if (auto r = writer.start_object(); !r) return r;
+    if (auto r = writer.key("content"); !r) return r;
+    const std::vector<std::map<std::string, std::string>> content{
+        {{"type", "text"}, {"text", std::string(text)}}};
+    if (auto r = writer.value(content); !r) return r;
+    if (auto r = writer.key("structuredContent"); !r) return r;
+    if (auto r = writer.raw(structured_json); !r) return r;
+    if (auto r = writer.end_object(); !r) return r;
+    if (auto r = writer.end_object(); !r) return r;
+    return writer.finish();
+}
+```
+
+| 方法 | 行为 |
+|------|------|
+| `start_object()` / `end_object()` | 开始 / 结束对象 |
+| `start_array()` / `end_array()` | 开始 / 结束数组 |
+| `key(std::string_view)` | 写入对象键，之后必须有一个值 |
+| `string(std::string_view)` | 验证 UTF-8 并转义，支持含 NUL 的显式视图 |
+| `number(T)` | 写入整数或浮点数，遵循非有限数策略 |
+| `boolean(bool)` / `null_value()` | 写入布尔值 / null |
+| `value(const T&)` | 直接遍历反射结构体、map、vector、array、optional、枚举及日期时间等类型 |
+| `value(const json::Json&)` | 直接遍历有效的 DOM 或子节点视图 |
+| `raw(std::string_view)` | 验证一个完整 JSON 值后原样写入，保留片段内空白和键顺序 |
+| `finish()` | 检查存在唯一根值且所有容器均已闭合，封存当前文档 |
+| `status()` | 获取当前错误状态；不检查文档是否完整 |
+| `bytes_written()` | sink 已成功接受的字节数 |
+| `reset()` | 保留 sink 和配置，清除状态，允许写入下一篇文档 |
+
+所有写入方法和 `finish()` 都返回 `json::result<void>`。首次发生错误后，后续
+写入不再调用 sink，并返回同一个错误，包括 sink 返回的原始错误消息。
+sink 若部分写入后失败，writer 无法计算失败片段中实际送出的字节，也无法回滚。
+调用方应丢弃未完成消息或关闭对应传输；`reset()` 不会清除 sink 已收到的内容。
+`finish()` 可重复调用，但之后继续写入会报错；它不会 flush 或关闭外部 sink。
+
+`SerializeOptions` 在构造 writer 时指定，支持紧凑 / pretty 输出、缩进、非有限数
+策略，以及输出字节、节点、嵌套深度、字符串、键和容器成员上限。上限按整篇
+文档累计，`raw()` 中的节点和深度也计入当前文档。根值深度为 0；optional、
+枚举等 C++ 包装类型不增加 JSON 节点或深度。`raw()` 为验证片段临时构建该片段
+的 DOM；已有 DOM 时可用 `value()` 避免重新解析。普通 typed 输出直接遍历输入，
+不构造中间 JSON 树；writer 只维护容器上下文栈。
+
+对象按输入顺序输出：手动写入按调用顺序，反射结构体按字段声明顺序，map 按
+自身迭代顺序。因此 unordered_map 的输出顺序不保证稳定。stream writer 不排序
+或检查重复键；包括 `raw()` 在内，键的唯一性由调用方保证。需要键排序和现有
+行为时使用 `json::serialize`。
+
+可直接把 C++ 值写到 sink，也可以在手动构建的对象 / 数组中嵌入 typed 值：
+
+```cpp
+std::string output;
+auto sink = [&](std::string_view part) -> json::result<void> {
+    output.append(part);  // 也可以同步写入文件或应用缓冲区
+    return {};
+};
+
+// 自动写入并 finish 一篇文档。
+auto result = json::stream::serialize(std::vector<int>{1, 2, 3}, sink);
+// result 为成功时，output 为 [1,2,3]。
+
+// 将 typed 值写入已有 writer 的当前位置，不自动结束外层文档。
+// json::stream::serialize(writer, value) 等价于 writer.value(value)。
+```
+
+JSON writer 不添加 NDJSON 换行、SSE 的 `data:` 前缀或 HTTP 分块边界；MCP 传输层
+在 `finish()` 成功后完成自身消息封装。sink 的片段边界不保证对应完整 JSON token
+或传输帧。

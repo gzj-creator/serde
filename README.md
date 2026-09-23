@@ -7,6 +7,7 @@ C++ 序列化库，提供 TOML 和 JSON 编解码。JSON 解析由项目内的 s
 - **内置 JSON 后端**：vendored simdjson 4.6.9 直接参与库构建，对外只暴露 `json::Json` 包装接口
 - **编译器无关**：基于编译器无关的反射模块，支持 LLVM/Clang 和 GCC
 - **确定性序列化**：输出格式规范、可预测
+- **流式 JSON 输出**：`json::stream::StreamWriter` 按输入顺序向同步 sink 输出，支持手动构建、C++ 值和 DOM 遍历
 - **资源限制**：默认校验字节、深度、节点、字符串和容器上限；可用 `enforce_document_limits = false` 关闭整树校验
 - **C++23**：语法和限制错误走 `std::expected`。CMake 消费方保留自身异常编译策略；mcpp 独立开发默认 `-fno-exceptions`，此时内存耗尽会终止进程
 
@@ -67,6 +68,7 @@ src/
 │   └── toml.cppm            # `import toml` 门面
 └── json/
     ├── json.hpp             # JSON 实现头（simdjson 后端）
+    ├── stream.hpp           # json::stream::StreamWriter 流式输出
     └── json.cppm            # `import json` 门面
 
 third_party/
@@ -82,7 +84,7 @@ test/           # CMake 冒烟测试（头文件 + 模块两条消费路径）
 
 ```bash
 mcpp build            # 模块形态，默认 LLVM 22.1.8 工具链 + debug profile
-mcpp test             # 全部 9 个测试
+mcpp test             # 全部 10 个测试
 mcpp build --profile release   # 基准测试请用 release 或 benchmark/run.sh
 ```
 
