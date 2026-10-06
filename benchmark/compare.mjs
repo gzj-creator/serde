@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,4 +97,29 @@ for (const fixture of [...fixtures, { name: 'reflected-64', iterations: 30000, w
         }
     }
 }
-writeFileSync(join(output, 'results.json'), JSON.stringify({ baseline, candidate, cpu, samples, summary }, null, 2) + '\n');
+
+const allocations = [];
+console.log('format,fixture,baseline_allocations_per_op,candidate_allocations_per_op,baseline_bytes_per_op,candidate_bytes_per_op');
+for (const fixture of fixtures) {
+    for (const format of ['json', 'toml']) {
+        const paired = {};
+        for (const [version, bin] of [['baseline', baseline], ['candidate', candidate]]) {
+            const binary = join(bin, `benchmark_serde_${format}_alloc`);
+            const params = [`--${format}`, fixture[format], '--phase', 'decode-only',
+                '--iterations', String(fixture.iterations), '--warmup', '100', '--allocations'];
+            const result = spawnSync(cpu === undefined ? binary : 'taskset',
+                cpu === undefined ? params : ['-c', cpu, binary, ...params], { encoding: 'utf8', cwd: root });
+            assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+            const totals = /allocation_calls=(\d+) allocation_bytes=(\d+)/.exec(result.stderr);
+            const checksum = /checksum=(\d+)/.exec(result.stdout);
+            assert(totals && checksum, `missing allocation result: ${result.stdout}\n${result.stderr}`);
+            paired[version] = { calls: Number(totals[1]), bytes: Number(totals[2]), checksum: checksum[1] };
+        }
+        assert.equal(paired.baseline.checksum, paired.candidate.checksum,
+            `${format} ${fixture.name} allocation checksum differs`);
+        const row = { format, fixture: fixture.name, iterations: fixture.iterations, ...paired };
+        allocations.push(row);
+        console.log(`${format},${fixture.name},${paired.baseline.calls / fixture.iterations},${paired.candidate.calls / fixture.iterations},${paired.baseline.bytes / fixture.iterations},${paired.candidate.bytes / fixture.iterations}`);
+    }
+}
+writeFileSync(join(output, 'results.json'), JSON.stringify({ baseline, candidate, cpu, samples, summary, allocations }, null, 2) + '\n');

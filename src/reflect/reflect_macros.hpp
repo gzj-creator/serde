@@ -10,18 +10,22 @@
 // 因此该接口没有预处理器字段数量限制。公共描述符和遍历位于 `reflect` 模块中，
 // 与任何序列化器无关。
 //
-// 列表条目可以是 `X(member)` 或 `X(member, "external-name")`。将两种拼写
-// 放在一个回调后面，使命名和未命名结构使用相同的规范声明宏。
+// 列表条目可为 X(member)、X(member, "external-name") 或
+// X(member, "external-name", (field_options<Member>{...}))。选项外层括号
+// 将初始化列表中的逗号保持在一个预处理器参数内。
 #define REFLECT_DETAIL_FIELD_1(member) \
     ::reflect::make_field(#member, &reflect_type::member),
 
 #define REFLECT_DETAIL_FIELD_2(member, name) \
     ::reflect::make_field(name, &reflect_type::member),
 
-#define REFLECT_DETAIL_PICK_FIELD(_1, _2, selected, ...) selected
+#define REFLECT_DETAIL_FIELD_3(member, name, options) \
+    ::reflect::make_field(name, &reflect_type::member, options),
+
+#define REFLECT_DETAIL_PICK_FIELD(_1, _2, _3, selected, ...) selected
 #define REFLECT_DETAIL_FIELD(...) \
-    REFLECT_DETAIL_PICK_FIELD(__VA_ARGS__, REFLECT_DETAIL_FIELD_2, \
-                              REFLECT_DETAIL_FIELD_1)(__VA_ARGS__)
+    REFLECT_DETAIL_PICK_FIELD(__VA_ARGS__, REFLECT_DETAIL_FIELD_3, \
+                              REFLECT_DETAIL_FIELD_2, REFLECT_DETAIL_FIELD_1)(__VA_ARGS__)
 
 #define REFLECT_FIELDS(TYPE, FIELDS) \
     constexpr auto reflect_fields(::std::type_identity<TYPE>) { \

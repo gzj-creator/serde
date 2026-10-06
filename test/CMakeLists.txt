@@ -7,6 +7,17 @@ add_executable(serde_json_stream json_stream.cpp)
 target_link_libraries(serde_json_stream PRIVATE serde::serde)
 add_test(NAME serde_json_stream COMMAND serde_json_stream)
 
+foreach(contract_test IN ITEMS field_contract json_contract toml_stream_contract)
+    add_executable("serde_${contract_test}" "${contract_test}.cpp")
+    target_link_libraries("serde_${contract_test}" PRIVATE serde::serde)
+    if(MSVC)
+        target_compile_options("serde_${contract_test}" PRIVATE /UNDEBUG)
+    else()
+        target_compile_options("serde_${contract_test}" PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME "serde_${contract_test}" COMMAND "serde_${contract_test}")
+endforeach()
+
 # Exercise backend linkage from a shared library in both static and shared builds.
 add_library(serde_shared_consumer SHARED shared_consumer.cpp)
 set_target_properties(serde_shared_consumer PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)

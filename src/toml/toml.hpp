@@ -2138,6 +2138,12 @@ result<Node> encodeValue(const T& input) {
     using U = BareT<T>;
 
     if constexpr (OptionalTraits<U>::value) {
+        using OptionalValue = typename OptionalTraits<U>::value_type;
+        if constexpr (std::is_enum_v<OptionalValue> && reflect::EnumReflectable<OptionalValue>) {
+            if (auto checked = reflect::validate_enum_descriptor<OptionalValue>(); !checked) {
+                return std::unexpected(std::move(checked.error()));
+            }
+        }
         if (!input) {
             return Node{};
         }
@@ -2207,6 +2213,16 @@ result<Node> encodeValue(const T& input) {
     } else if constexpr (std::is_floating_point_v<U>) {
         return Node{static_cast<double>(input)};
     } else if constexpr (std::is_enum_v<U>) {
+        if (auto checked = reflect::validate_enum(input); !checked) {
+            return std::unexpected(std::move(checked.error()));
+        }
+        if constexpr (reflect::EnumReflectable<U>) {
+            if (reflect::enum_descriptor_for<U>().encoding == reflect::enum_encoding::string) {
+                auto name = reflect::enum_to_string(input);
+                if (!name) return std::unexpected(std::move(name.error()));
+                return encodeValue(*name);
+            }
+        }
         using Underlying = std::underlying_type_t<U>;
         return encodeValue(static_cast<Underlying>(input));
     } else if constexpr (VectorTraits<U>::value) {
@@ -2281,6 +2297,11 @@ result<Node> encodeValue(const T& input) {
             if (!valid_utf8(descriptor.name)) {
                 failed = true;
                 failure = "invalid UTF-8 in reflected TOML key";
+                return;
+            }
+            if (auto checked = reflect::validate_field(descriptor, member); !checked) {
+                failed = true;
+                failure = "field '" + std::string(descriptor.name) + "': " + checked.error();
                 return;
             }
             if constexpr (OptionalTraits<Member>::value) {
@@ -2666,6 +2687,12 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
     const auto where = path.empty() ? std::string("value") : std::string(path);
 
     if constexpr (OptionalTraits<U>::value) {
+        using OptionalValue = typename OptionalTraits<U>::value_type;
+        if constexpr (std::is_enum_v<OptionalValue> && reflect::EnumReflectable<OptionalValue>) {
+            if (auto checked = reflect::validate_enum_descriptor<OptionalValue>(); !checked) {
+                return std::unexpected(where + " " + checked.error());
+            }
+        }
         if (std::holds_alternative<std::monostate>(input.value)) {
             return U{};
         }
@@ -2745,12 +2772,30 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
         }
         return std::unexpected(where + " must be a TOML number");
     } else if constexpr (std::is_enum_v<U>) {
+        if constexpr (reflect::EnumReflectable<U>) {
+            if (auto checked = reflect::validate_enum_descriptor<U>(); !checked) {
+                return std::unexpected(where + " " + checked.error());
+            }
+            if (reflect::enum_descriptor_for<U>().encoding == reflect::enum_encoding::string) {
+                const auto* name = std::get_if<std::string>(&input.value);
+                if (name == nullptr) {
+                    return std::unexpected(where + " must be a TOML enum string");
+                }
+                auto decoded = reflect::enum_from_string<U>(*name);
+                if (!decoded) return std::unexpected(where + " " + decoded.error());
+                return *decoded;
+            }
+        }
         using Underlying = std::underlying_type_t<U>;
         auto decoded = decodeValue<Underlying>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
-        return static_cast<U>(*decoded);
+        const auto value = static_cast<U>(*decoded);
+        if (auto checked = reflect::validate_enum(value); !checked) {
+            return std::unexpected(where + " " + checked.error());
+        }
+        return value;
     } else if constexpr (VectorTraits<U>::value) {
         const auto* values = std::get_if<Node::array>(&input.value);
         if (values == nullptr) {
@@ -2827,6 +2872,10 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                     const auto iterator = values->find(descriptor.name);
                     if (iterator == values->end()) {
                         if constexpr (OptionalTraits<Member>::value) {
+                            if (auto checked = reflect::validate_field(descriptor, descriptor.get(object)); !checked) {
+                                failed = true;
+                                failure = memberDecodePath(where, descriptor.name) + " " + checked.error();
+                            }
                             return;
                         } else {
                             failed = true;
@@ -2841,6 +2890,11 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                         failed = true;
                         failure = rebaseDecodeError(
                             decoded.error(), memberDecodePath(where, descriptor.name));
+                        return;
+                    }
+                    if (auto checked = reflect::validate_field(descriptor, *decoded); !checked) {
+                        failed = true;
+                        failure = memberDecodePath(where, descriptor.name) + " " + checked.error();
                         return;
                     }
                     descriptor.get(object) = std::move(*decoded);

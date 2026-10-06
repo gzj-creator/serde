@@ -54,7 +54,7 @@ REFLECT_FIELDS(server, SERVER_FIELDS)
 
 C++23 无法枚举现有结构体的成员，因此成员名仍必须在声明处列出一次。
 
-`reflect::field` 仅包含 `std::string_view` 和成员指针。这保持了公共契约的编译器独立性，让 LLVM/Clang 消费者可以使用其自身翻译单元生成的元数据。
+默认 `reflect::field` 只保存外部字段名和成员指针，带选项版本另保存协议无关的字段约束。两者可以在编译期构造，LLVM/Clang 和 GCC 消费者均可使用。字段约束和显式枚举编码的用法见 [字段契约](field-contract-README.md)，TOML 编解码与 JSON/流式 JSON 使用相同的校验规则。
 
 标准对称 API：
 

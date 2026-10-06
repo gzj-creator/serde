@@ -17,6 +17,12 @@ add_executable(header_smoke header_smoke.cpp)
 target_link_libraries(header_smoke PRIVATE serde::serde)
 add_test(NAME installed.header_smoke COMMAND header_smoke)
 
+foreach(contract_test IN ITEMS field_contract json_contract toml_stream_contract)
+    add_executable("${contract_test}" "${contract_test}.cpp")
+    target_link_libraries("${contract_test}" PRIVATE serde::serde)
+    add_test(NAME "installed.${contract_test}" COMMAND "${contract_test}")
+endforeach()
+
 if(TARGET serde::serde-cpp23-modules)
     add_executable(module_smoke module_smoke.cpp)
     set_target_properties(module_smoke PROPERTIES

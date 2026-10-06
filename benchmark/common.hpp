@@ -1,6 +1,27 @@
 #pragma once
 
+#ifdef SERDE_BENCHMARK_HEADERS
+#include <charconv>
+#include <chrono>
+#include <concepts>
+#include <cstdint>
+#include <cstdlib>
+#include <expected>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <new>
+#include <print>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#else
 import std;
+#endif
 
 #if defined(SERDE_BENCHMARK_ALLOCATION_PROFILE)
 namespace benchmark::detail {

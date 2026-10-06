@@ -83,3 +83,46 @@
 - **反序列化检查**：输入放得进默认节点、字符串、键、数组和成员上限时，不再对整篇 DOM 做完整限制遍历；重复键和可能超深度的文档改为只扫描对象键与嵌套深度。更紧的上限仍走完整检查，`json::parse` 不变。成功解码时不再预先构造错误路径字符串 `"value"`。
 - **基准记录**：`benchmark/README.md` 记录相对 `v0.2.2` 的反序列化探针数据。样本按 `config.json` 的形状生成，200 台服务器为 12315 字节，平均时间从 73 µs 降到 49 µs。
 - **版本同步**：`CMakeLists.txt`、`MODULE.bazel`、`mcpp.toml` 包版本声明更新为 `0.3.0`。
+
+## v0.4.0 - 2026-10-06
+
+- 版本级别：次版本（minor）
+- Git 提交消息：`feat: 新增跨格式字段契约与枚举编码，发布 v0.4.0`
+- git tag：`v0.4.0`
+
+### 摘要
+
+自 `v0.3.0` 以来的累计变更：
+
+- **通用字段契约**：新增 `field_options<Member>`、三参数字段登记和公开校验，
+  支持描述、精确数值范围、Unicode 标量长度及容器数量；无约束字段仍使用轻量
+  name+pointer 布局和静态空 options，带约束描述符不能隐式切片。
+- **枚举编码**：新增 ADL descriptor、字符串或实际底层值编码和合法集合，
+  公开映射 helper 用同一快照校验与查找。非法/重复/空/无效 UTF-8 元数据和
+  已登记枚举中的未知值显式失败，不缓存或忽略运行期损坏。
+- **跨格式执行**：JSON DOM、TOML 编解码及 JSON StreamWriter 实际执行约束；
+  optional 缺失保留并校验对象值，JSON null 清空，TOML 空值省略。
+  所有校验失败返回 `std::expected`，流式首个错误在后续写入/status/finish 保留。
+- **公开 JSON 绑定接口**：新增 `decode_field` 和 `decode_fields_into`，
+  全字段与选择解码共享既有索引查找，严格策略仅允许选择集合；动态描述符重排
+  和 name/get 自定义描述符均有跨格式回归。失败对象可能已部分赋值，需丢弃。
+- **安装修复**：收束上个 tag 后的模块静态库、初始化符号、安装依赖元数据和
+  多 consumer BMI 重建修复。原生模块消费要求 CMake >= 3.31；关闭模块接口
+  安装时仍可用 CMake 3.28 消费公开头文件。
+- **测试与文档**：新增字段/JSON/TOML-stream 契约测试、安装与 module 消费验证、
+  使用说明及不依赖 import std 的 CMake 基准入口；三套包版本同步为 `0.4.0`。
+
+### 验收
+
+- GCC14 Release `-fno-exceptions` CTest 7/7，Clang22 module/header CTest 8/8，
+  安装后包含两个 module consumer 的测试 6/6，Galay serde 消费回归 12/12。
+- 候选安装包的头文件消费 ASan/UBSan 4/4 通过；未新增生产异常控制流或同步锁。
+- 与 `bb02aeb` 用同一 GCC14 Release 夹具/编译选项配对，CPU0 绑定且不与构建并发。
+  10轮全部合并中位数：既有 decode-only 变化为 -6.83% 至 +1.89%，端到端最坏
+  +6.74%，均在预定10%门槛内；两项争议场景7轮加长测量也通过，未筛掉原样本。
+- default/medium/large/4096键map 的 JSON/TOML 解码分配次数与字节完全不增加。
+  6字段校验中位62.44ns，3值enum名称往返49.35ns，两项100万次成功路径均零堆分配。
+  完整方法、波动及数据范围见 `benchmark/README.md`，不宣称任意负载绝对最优。
+- 本次只发布 serde 数据契约扩展，HTTP/OpenAPI/HTTP2/WebSocket 尚未实施。
+  Bazel 和 GCC15 module 未在本机验证；Clang22 验证使用系统 libstdc++及
+  `--no-default-config`，不声称默认 mcpp 工具链或其他平台均已通过。

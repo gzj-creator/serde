@@ -129,3 +129,58 @@ a fresh `json::parse` each iteration. `--reuse-context` switches to a reused
 深度仍由解析器的 `max_depth` 与这次扫描共同约束。用户把某项上限收紧到输入放不下时，
 继续走原来的完整检查。`json::parse` 的检查路径没有改变。64 字段整数样本几乎不变，
 因为时间主要在建 DOM 和按字段填结构，不在字符串长度检查上。
+
+## v0.4.0 字段契约发布验收
+
+新 CMake 入口从安装包消费公开头文件和 `serde::serde`，不需要 import std。
+同一份 benchmark 可以分别链接基线/候选安装目录，避免测试夹具或编译选项不同：
+
+```sh
+cmake -S benchmark -B build/bench -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-fno-exceptions \
+  -Dserde_DIR=INSTALL_PREFIX/lib/cmake/serde
+cmake --build build/bench --parallel 1
+node benchmark/compare.mjs BASELINE_BIN CANDIDATE_BIN OUTPUT_DIR 0
+cmake --build build/bench --target benchmark_serde_contract benchmark_serde_contract_alloc --parallel 1
+taskset -c 0 build/bench/benchmark_serde_contract --iterations 3000000 --warmup 100
+taskset -c 0 build/bench/benchmark_serde_contract_alloc --iterations 1000000 --warmup 100 --allocations
+```
+
+发布基线为 `bb02aeb`，含 v0.3.0 后的安装修复。工具链为 GCC14.2、系统
+libstdc++、`-O3 -DNDEBUG -std=c++23 -fno-exceptions`；Xeon Platinum 8255C
+虚拟机上绑定 CPU0，计时不与构建并发。门槛在测量前固定：既有未配置约束
+路径的端到端及 decode-only 中位耗时回退不超过10%，解码分配次数和请求字节
+不增加，新校验成功路径零堆分配；默认描述符实例尺寸等于原 name+pointer 布局。
+
+两次完整测量各5轮交替执行，全部保留而非取最好一轮。第二次测量中个别
+TOML 默认解码和 JSON 4096键端到端样本超过10%，未改动的 parse-only 对照
+也出现明显波动；因此合并全部10轮取中位数，并对这两个争议场景另做更长循环。
+下表为合并中位耗时，单位 ns，正变化表示变慢：
+
+| 格式/场景 | 基线 decode | 候选 decode | decode变化 | 端到端变化 |
+| --- | ---: | ---: | ---: | ---: |
+| JSON default | 1251.77 | 1275.48 | +1.89% | -0.30% |
+| JSON medium | 4507.60 | 4575.05 | +1.50% | -3.85% |
+| JSON large | 35639.54 | 35555.22 | -0.24% | +0.92% |
+| JSON 4096键map | 832427.37 | 838603.29 | +0.74% | +6.74% |
+| JSON 64反射字段 | 2689.99 | 2506.16 | -6.83% | -0.80% |
+| TOML default | 1126.79 | 1107.55 | -1.71% | +0.01% |
+| TOML medium | 3876.16 | 3853.89 | -0.57% | +0.72% |
+| TOML large | 30839.88 | 30853.33 | +0.04% | -0.48% |
+| TOML 4096键map | 673926.56 | 670021.87 | -0.58% | -0.28% |
+
+争议场景加长为7轮：TOML default decode-only 每轮100万次，基线1321.71ns、
+候选1120.49ns（-15.22%）；JSON 4096键端到端每轮300次，基线1782972.34ns、
+候选1653386.46ns（-7.27%）。两项均未复现持续回退，全部样本保留。
+虚拟机调度和频率波动明显，不将这些额外改善解释为固定的算法加速幅度。
+
+JSON/TOML 的每次解码分配均与基线完全一致：default 7次/521字节，medium
+27次/3457字节，large 131次/31233字节，4096键map 4096次/294912字节。
+6字段约束校验（含精确整数、浮点、字符串、optional、容器和enum）5轮中位
+62.44ns；3值enum名称往返49.35ns。两者各100万次成功调用均为0次/0字节堆分配。
+这些是固定夹具的校验成本，不是带约束codec整体耗时，也不代表任意大小enum或字符串成本。
+
+Galay验收工作区保留原始结果在 `build/serde-release-comparison-final-20261006/`
+（results.json、combined.json、features.json、investigation.json）和
+`build/serde-release-comparison-confirm-20261006/results.json`。不将构建产物提交。
+这些数据证明所测路径通过门槛，不宣称所有工具链和工作负载上的绝对最优。

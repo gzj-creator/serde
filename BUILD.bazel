@@ -31,3 +31,24 @@ cc_test(
     copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
     deps = [":serde"],
 )
+
+cc_test(
+    name = "field_contract",
+    srcs = ["test/field_contract.cpp"],
+    copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
+    deps = [":serde"],
+)
+
+cc_test(
+    name = "json_contract",
+    srcs = ["test/json_contract.cpp"],
+    copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
+    deps = [":serde"],
+)
+
+cc_test(
+    name = "toml_stream_contract",
+    srcs = ["test/toml_stream_contract.cpp"],
+    copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
+    deps = [":serde"],
+)

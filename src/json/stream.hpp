@@ -186,6 +186,12 @@ public:
         if (auto state = active(); !state) return state;
         using U = json::detail::BareT<T>;
         if constexpr (json::detail::OptionalTraits<U>::value) {
+            using OptionalValue = typename json::detail::OptionalTraits<U>::value_type;
+            if constexpr (std::is_enum_v<OptionalValue> && reflect::EnumReflectable<OptionalValue>) {
+                if (auto checked = reflect::validate_enum_descriptor<OptionalValue>(); !checked) {
+                    return fail(std::move(checked.error()));
+                }
+            }
             return input ? value(*input) : null_value();
         } else if constexpr (json::detail::InlineTableTraits<U>::value) {
             return value(input.value);
@@ -215,6 +221,16 @@ public:
         } else if constexpr (std::is_arithmetic_v<U>) {
             return number(input);
         } else if constexpr (std::is_enum_v<U>) {
+            if (auto checked = reflect::validate_enum(input); !checked) {
+                return fail(std::move(checked.error()));
+            }
+            if constexpr (reflect::EnumReflectable<U>) {
+                if (reflect::enum_descriptor_for<U>().encoding == reflect::enum_encoding::string) {
+                    auto name = reflect::enum_to_string(input);
+                    if (!name) return fail(std::move(name.error()));
+                    return string(*name);
+                }
+            }
             return value(static_cast<std::underlying_type_t<U>>(input));
         } else if constexpr (std::is_convertible_v<const T&, std::string_view>) {
             if constexpr (std::is_pointer_v<U>) {
@@ -254,6 +270,10 @@ public:
             result<void> written;
             json::for_each_field(input, [&](const auto& descriptor, const auto& object) {
                 if (!written) return;
+                if (auto checked = reflect::validate_field(descriptor, descriptor.get(object)); !checked) {
+                    written = fail("field '" + std::string(descriptor.name) + "': " + checked.error());
+                    return;
+                }
                 written = key(descriptor.name);
                 if (written) written = value(descriptor.get(object));
             });

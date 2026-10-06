@@ -4,6 +4,9 @@ file(MAKE_DIRECTORY "${work}/source")
 file(COPY "${CMAKE_CURRENT_LIST_DIR}/installed_consumer/CMakeLists.txt"
     "${CMAKE_CURRENT_LIST_DIR}/header_smoke.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/module_smoke.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/field_contract.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/json_contract.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/toml_stream_contract.cpp"
     DESTINATION "${work}/source")
 
 function(run_checked)

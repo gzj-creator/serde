@@ -1,5 +1,9 @@
+#ifdef SERDE_BENCHMARK_HEADERS
+#include <serde/json/json.hpp>
+#else
 import std;
 import json;
+#endif
 
 #include "common.hpp"
 #include "../src/reflect/reflect_macros.hpp"

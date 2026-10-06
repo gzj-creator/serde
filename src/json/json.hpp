@@ -584,6 +584,12 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
     ++context.nodes;
 
     if constexpr (OptionalTraits<U>::value) {
+        using Member = typename OptionalTraits<U>::value_type;
+        if constexpr (reflect::EnumReflectable<Member>) {
+            if (auto checked = reflect::validate_enum_descriptor<Member>(); !checked) {
+                return std::unexpected(checked.error());
+            }
+        }
         if (!input) {
             return Node{};
         }
@@ -654,6 +660,17 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
         }
         return Node{value};
     } else if constexpr (std::is_enum_v<U>) {
+        if constexpr (reflect::EnumReflectable<U>) {
+            if (auto checked = reflect::validate_enum(input); !checked) {
+                return std::unexpected(checked.error());
+            }
+            const auto descriptor = reflect::enum_descriptor_for<U>();
+            if (descriptor.encoding == reflect::enum_encoding::string) {
+                auto name = reflect::enum_to_string(input);
+                if (!name) return std::unexpected(name.error());
+                return encodeValue(*name, context, depth + 1);
+            }
+        }
         return encodeValue(static_cast<std::underlying_type_t<U>>(input), context, depth + 1);
     } else if constexpr (VectorTraits<U>::value) {
         if (input.size() > context.options.max_array_items) {
@@ -719,6 +736,13 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
                 failed = true;
                 failure = "invalid or oversized UTF-8 reflected JSON key";
                 return;
+            }
+            if constexpr (requires { descriptor.options; }) {
+                if (auto checked = reflect::validate_field(descriptor, descriptor.get(object)); !checked) {
+                    failed = true;
+                    failure = "field '" + std::string(descriptor.name) + "': " + checked.error();
+                    return;
+                }
             }
             auto encoded = encodeValue(descriptor.get(object), context, depth + 1);
             if (!encoded) {
@@ -942,6 +966,14 @@ struct DuplicateKeyScan {
 template <class T>
 result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options);
 
+template <class Member, class Descriptor>
+result<Member> decodeFieldValue(
+    const Descriptor& descriptor, const Json& input, const ParseOptions& options);
+
+template <class T, class Selector>
+result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
+                             const ParseOptions& options);
+
 inline std::string rebaseDecodeError(std::string error, std::string_view path);
 inline std::string indexedDecodePath(std::string_view path, std::size_t index);
 inline std::string memberDecodePath(std::string_view path, std::string_view member);
@@ -1058,12 +1090,170 @@ template <class T>
     requires reflect::StaticReflectable<T>
 inline constexpr auto staticFieldLookup = StaticFieldLookup{staticFieldNames<T>};
 
+struct AllFields {
+    template <class Descriptor>
+    constexpr bool operator()(const Descriptor&) const noexcept { return true; }
+};
+
+template <class Descriptor, class Member>
+result<void> validateFieldValue(const Descriptor& descriptor, const Member& value) {
+    if (auto checked = reflect::validate_field(descriptor, value); !checked) {
+        return std::unexpected(memberDecodePath("value", descriptor.name) + ": " + checked.error());
+    }
+    return {};
+}
+
+template <class Member, class Descriptor>
+result<Member> decodeFieldValue(const Descriptor& descriptor, const Json& input,
+                               const ParseOptions& options) {
+    if (!input.valid()) {
+        if constexpr (OptionalTraits<Member>::value) {
+            Member value{};
+            if (auto checked = validateFieldValue(descriptor, value); !checked) {
+                return std::unexpected(checked.error());
+            }
+            return value;
+        }
+        return std::unexpected("value is missing field '" + std::string(descriptor.name) + "'");
+    }
+    auto decoded = decodeValue<Member>(input, {}, options);
+    if (!decoded) {
+        return std::unexpected(rebaseDecodeError(decoded.error(), memberDecodePath("value", descriptor.name)));
+    }
+    if (auto checked = validateFieldValue(descriptor, *decoded); !checked) {
+        return std::unexpected(checked.error());
+    }
+    return decoded;
+}
+
+template <class T, class Selector>
+result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
+                             const ParseOptions& options) {
+    if (!input.is_object()) return std::unexpected(std::string("value must be a JSON object"));
+    using Fields = BareT<decltype(reflect::fields(std::declval<T&>()))>;
+    const auto& descriptors = reflect::fields(output);
+    constexpr std::size_t field_count = std::tuple_size_v<Fields>;
+    constexpr bool select_all = std::same_as<BareT<Selector>, AllFields>;
+    std::array<bool, select_all ? 0 : field_count> selected{};
+    if constexpr (!select_all) {
+        std::size_t index = 0;
+        std::apply([&](const auto&... descriptor) {
+            ((selected[index++] = std::invoke(selector, descriptor)), ...);
+        }, descriptors);
+    }
+    // Keep the existing indexed lookup for larger objects; small ones read directly.
+    constexpr bool use_index = field_count > 16 ||
+        (field_count == 16 && reflect::StaticReflectable<T>);
+    std::array<Json, use_index ? field_count : 0> members{};
+    if constexpr (use_index) {
+        const auto& names = [&]() -> decltype(auto) {
+            if constexpr (reflect::StaticReflectable<T>) return (staticFieldNames<T>);
+            else return indexedFieldNames(descriptors);
+        }();
+        const auto walked = input.for_each_member(
+            [&](std::string_view key, const Json& child) -> result<void> {
+                auto found = [&]() {
+                    if constexpr (reflect::StaticReflectable<T>) {
+                        return names.begin() + staticFieldLookup<T>.find(key, names);
+                    } else {
+                        return std::lower_bound(names.begin(), names.end(), key,
+                            [](const auto& field, std::string_view name) { return field.first < name; });
+                    }
+                }();
+                for (; found != names.end() && found->first == key; ++found) {
+                    if constexpr (!select_all) {
+                        if (!selected[found->second]) continue;
+                    }
+                    auto& member = members[found->second];
+                    if (!member.valid()) member = child;
+                }
+                return {};
+            });
+        if (!walked) return std::unexpected(walked.error());
+    }
+    result<void> decoded;
+    auto decode_member = [&]<std::size_t Index>() {
+        const auto& descriptor = std::get<Index>(descriptors);
+        if (!decoded) return;
+        if constexpr (!select_all) {
+            if (!selected[Index]) return;
+        }
+        using Member = BareT<decltype(descriptor.get(output))>;
+        using Descriptor = BareT<decltype(descriptor)>;
+        constexpr bool validate = [] {
+            if constexpr (requires { typename std::bool_constant<Descriptor::options.empty()>; }) {
+                return !Descriptor::options.empty() ||
+                       reflect::EnumReflectable<reflect::detail::optional_value_t<Member>>;
+            } else return true;
+        }();
+        if constexpr (!std::is_assignable_v<decltype(descriptor.get(output)), Member>) {
+            decoded = std::unexpected("value field '" + std::string(descriptor.name) + "' is not assignable");
+        } else {
+            const auto& member = [&]() -> decltype(auto) {
+                if constexpr (use_index) return (members[Index]);
+                else return input.at(descriptor.name);
+            }();
+            if constexpr (OptionalTraits<Member>::value) {
+                if (!member.valid()) {
+                    if constexpr (validate) decoded = validateFieldValue(descriptor, descriptor.get(output));
+                    return;
+                }
+            } else if (!member.valid()) {
+                decoded = std::unexpected("value is missing field '" + std::string(descriptor.name) + "'");
+                return;
+            }
+            auto value = decodeValue<Member>(member, {}, options);
+            if (!value) {
+                decoded = std::unexpected(rebaseDecodeError(value.error(), memberDecodePath("value", descriptor.name)));
+                return;
+            }
+            if constexpr (validate) {
+                decoded = validateFieldValue(descriptor, *value);
+                if (!decoded) return;
+            }
+            descriptor.get(output) = std::move(*value);
+        }
+    };
+    [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+        (decode_member.template operator()<Index>(), ...);
+    }(std::make_index_sequence<field_count>{});
+    if (!decoded) return decoded;
+    if (options.unknown_fields == UnknownFieldPolicy::reject) {
+        // A selection mask must keep the descriptor order used before assignment.
+        const auto& known_descriptors = [&]() -> decltype(auto) {
+            if constexpr (select_all) return reflect::fields(output);
+            else return (descriptors);
+        }();
+        const auto& names = [&]() -> decltype(auto) {
+            if constexpr (reflect::StaticReflectable<T>) return (staticFieldNames<T>);
+            else return indexedFieldNames(known_descriptors);
+        }();
+        const auto walked = input.for_each_member([&](std::string_view key, const Json&) -> result<void> {
+            auto found = std::lower_bound(names.begin(), names.end(), key,
+                [](const auto& field, std::string_view name) { return field.first < name; });
+            for (; found != names.end() && found->first == key; ++found) {
+                if constexpr (select_all) return {};
+                else if (selected[found->second]) return {};
+            }
+            return std::unexpected("value contains unknown field '" + std::string(key) + "'");
+        });
+        if (!walked) return std::unexpected(walked.error());
+    }
+    return {};
+}
+
 template <class T>
 result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options) {
     using U = BareT<T>;
     const LazyWhere where{path};
 
     if constexpr (OptionalTraits<U>::value) {
+        using Member = typename OptionalTraits<U>::value_type;
+        if constexpr (reflect::EnumReflectable<Member>) {
+            if (auto checked = reflect::validate_enum_descriptor<Member>(); !checked) {
+                return std::unexpected(where + ": " + checked.error());
+            }
+        }
         if (input.is_null()) {
             return U{};
         }
@@ -1075,10 +1265,29 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         if (!decoded) return std::unexpected(decoded.error());
         return U{std::move(*decoded)};
     } else if constexpr (std::is_enum_v<U>) {
+        if constexpr (reflect::EnumReflectable<U>) {
+            if (auto checked = reflect::validate_enum_descriptor<U>(); !checked) {
+                return std::unexpected(where + ": " + checked.error());
+            }
+            const auto descriptor = reflect::enum_descriptor_for<U>();
+            if (descriptor.encoding == reflect::enum_encoding::string) {
+                auto name = input.as_string();
+                if (!name) return std::unexpected(where + " must be a JSON enum string");
+                auto decoded = reflect::enum_from_string<U>(*name);
+                if (!decoded) return std::unexpected(where + ": " + decoded.error());
+                return *decoded;
+            }
+        }
         using Underlying = std::underlying_type_t<U>;
         auto decoded = decodeValue<Underlying>(input, path, options);
         if (!decoded) return std::unexpected(decoded.error());
-        return static_cast<U>(*decoded);
+        const auto value = static_cast<U>(*decoded);
+        if constexpr (reflect::EnumReflectable<U>) {
+            if (auto checked = reflect::validate_enum(value); !checked) {
+                return std::unexpected(where + ": " + checked.error());
+            }
+        }
+        return value;
     } else if constexpr (std::same_as<U, std::nullptr_t>) {
         if (input.is_null()) return nullptr;
         return std::unexpected(where + " must be JSON null");
@@ -1231,96 +1440,8 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
             return std::unexpected(where + " is not default constructible");
         } else {
             U output{};
-            auto descriptors = reflect::fields(output);
-            constexpr auto field_count = std::tuple_size_v<decltype(descriptors)>;
-            // Small records are faster without a scratch member array.
-            constexpr bool use_index = field_count > 16 ||
-                (field_count == 16 && reflect::StaticReflectable<U>);
-            std::array<Json, use_index ? field_count : 0> members{};
-            if constexpr (use_index) {
-                const auto& names = [&]() -> decltype(auto) {
-                    if constexpr (reflect::StaticReflectable<U>) return (staticFieldNames<U>);
-                    else return indexedFieldNames(descriptors);
-                }();
-                const auto walked = input.for_each_member(
-                    [&](std::string_view key, const Json& child) -> result<void> {
-                        auto found = [&]() {
-                            if constexpr (reflect::StaticReflectable<U>) {
-                                return names.begin() + staticFieldLookup<U>.find(key, names);
-                            } else {
-                                return std::lower_bound(names.begin(), names.end(), key,
-                                    [](const auto& field, std::string_view name) {
-                                        return field.first < name;
-                                    });
-                            }
-                        }();
-                        // Multiple descriptors may intentionally read the same key.
-                        for (; found != names.end() && found->first == key; ++found) {
-                            auto& member = members[found->second];
-                            if (!member.valid()) member = child;
-                        }
-                        return {};
-                    });
-                if (!walked) return std::unexpected(walked.error());
-            }
-            bool failed = false;
-            std::string failure;
-            std::size_t member_index = 0;
-            auto decode_member = [&](const auto& descriptor) {
-                if (failed) return;
-                using Member = BareT<decltype(descriptor.get(output))>;
-                if constexpr (!std::is_assignable_v<decltype(descriptor.get(output)), Member>) {
-                    failed = true;
-                    failure = where + " field '" + std::string(descriptor.name) + "' is not assignable";
-                    return;
-                }
-                const auto& member = [&]() -> decltype(auto) {
-                    if constexpr (use_index) return (members[member_index++]);
-                    else return input.at(descriptor.name);
-                }();
-                if (!member.valid()) {
-                    if constexpr (OptionalTraits<Member>::value) return;
-                    failed = true;
-                    failure = where + " is missing field '" + std::string(descriptor.name) + "'";
-                    return;
-                }
-                auto decoded = decodeValue<Member>(member, {}, options);
-                if (!decoded) {
-                    failed = true;
-                    failure = rebaseDecodeError(
-                        decoded.error(), memberDecodePath(where.view(), descriptor.name));
-                    return;
-                }
-                if constexpr (std::is_assignable_v<decltype(descriptor.get(output)), Member>) {
-                    descriptor.get(output) = std::move(*decoded);
-                }
-            };
-            std::apply([&](const auto&... descriptor) {
-                (decode_member(descriptor), ...);
-            }, descriptors);
-            if (!failed && options.unknown_fields == UnknownFieldPolicy::reject) {
-                // Runtime descriptors may depend on the decoded object.
-                const auto known_descriptors = reflect::fields(output);
-                const auto& known_names = [&]() -> decltype(auto) {
-                    if constexpr (reflect::StaticReflectable<U>) return (staticFieldNames<U>);
-                    else return indexedFieldNames(known_descriptors);
-                }();
-                const auto walked = input.for_each_member([&](std::string_view key, const Json&) -> result<void> {
-                    const auto found = std::lower_bound(known_names.begin(), known_names.end(), key,
-                        [](const auto& field, std::string_view name) {
-                            return field.first < name;
-                        });
-                    const bool known = found != known_names.end() && found->first == key;
-                    if (!known) {
-                        failed = true;
-                        failure = where + " contains unknown field '" + std::string(key) + "'";
-                        return std::unexpected(failure);
-                    }
-                    return {};
-                });
-                static_cast<void>(walked);
-            }
-            if (failed) return std::unexpected(std::move(failure));
+            auto decoded = decodeFieldsInto(input, output, AllFields{}, options);
+            if (!decoded) return std::unexpected(rebaseDecodeError(decoded.error(), where.view()));
             return output;
         }
     } else {
@@ -1563,6 +1684,22 @@ result<std::string> serialize(const T& value, const SerializeOptions& options = 
 template <class T>
 result<T> decode(const Json& value, const ParseOptions& options = {}) {
     return detail::decodeValue<T>(value, {}, options);
+}
+
+/// A missing optional returns an empty value: this function has no owner default.
+template <class Owner, class Member, bool HasOptions>
+result<std::remove_cvref_t<Member>> decode_field(const reflect::field<Owner, Member, HasOptions>& descriptor,
+                                                const Json& value, const ParseOptions& options = {}) {
+    return detail::decodeFieldValue<std::remove_cvref_t<Member>>(descriptor, value, options);
+}
+
+/// Decode selected fields in place; missing optionals preserve and validate current values.
+/// Failure may leave prior selected fields assigned. Strict unknown checking uses the selection.
+template <class T, class Selector>
+    requires Reflectable<T>
+result<void> decode_fields_into(const Json& value, T& output, Selector&& selector,
+                               const ParseOptions& options = {}) {
+    return detail::decodeFieldsInto(value, output, std::forward<Selector>(selector), options);
 }
 
 template <class T>
