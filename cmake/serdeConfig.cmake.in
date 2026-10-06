@@ -1,5 +1,9 @@
 @PACKAGE_INIT@
 
+if(@SERDE_CPP23_MODULES_EFFECTIVE@)
+    cmake_minimum_required(VERSION 3.31)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/serdeTargets.cmake")
 
 check_required_components(serde)

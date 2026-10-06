@@ -95,8 +95,8 @@ target_link_libraries(serde
 # ---------------------------------------------------------------------------
 set(SERDE_CPP23_MODULES_EFFECTIVE OFF)
 if(SERDE_BUILD_CPP23_MODULES)
-    if(CMAKE_VERSION VERSION_LESS 3.28)
-        message(WARNING "SERDE_BUILD_CPP23_MODULES=ON requires CMake >= 3.28; skipping module file set")
+    if(CMAKE_VERSION VERSION_LESS 3.31)
+        message(FATAL_ERROR "SERDE_BUILD_CPP23_MODULES=ON requires CMake >= 3.31 for installed multi-target consumers")
     elseif(NOT CMAKE_GENERATOR MATCHES "Ninja|Visual Studio")
         message(WARNING "SERDE_BUILD_CPP23_MODULES=ON requires a C++ module-capable generator; skipping module file set")
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -111,7 +111,7 @@ if(SERDE_BUILD_CPP23_MODULES)
 endif()
 
 if(SERDE_CPP23_MODULES_EFFECTIVE)
-    add_library(serde-cpp23-modules OBJECT)
+    add_library(serde-cpp23-modules STATIC)
     add_library(serde::serde_cpp23_modules ALIAS serde-cpp23-modules)
     set_target_properties(serde-cpp23-modules PROPERTIES
         POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -208,7 +208,8 @@ if(SERDE_CPP23_MODULES_EFFECTIVE AND SERDE_INSTALL_CPP23_MODULE_INTERFACES)
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         FILE_SET CXX_MODULES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/serde
-        CXX_MODULES_BMI DESTINATION ${CMAKE_INSTALL_LIBDIR}/serde/cxx-modules
+        # Installed consumers rebuild BMIs with their own compiler and flags.
+        CXX_MODULES_BMI DESTINATION ""
     )
 endif()
 

@@ -23,3 +23,14 @@ if(SERDE_CPP23_MODULES_EFFECTIVE)
         serde::serde_cpp23_modules serde::serde_simdjson)
     add_test(NAME serde_module_smoke COMMAND serde_module_smoke)
 endif()
+
+add_test(NAME serde_install_consumer
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSERDE_BINARY_DIR=${CMAKE_BINARY_DIR}"
+        "-DSERDE_GENERATOR=${CMAKE_GENERATOR}"
+        "-DSERDE_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DSERDE_COMPILER_FLAGS=${CMAKE_CXX_FLAGS}"
+        "-DSERDE_CONFIG=$<CONFIG>"
+        "-DSERDE_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/install_consumer.cmake")
+set_tests_properties(serde_install_consumer PROPERTIES TIMEOUT 180)

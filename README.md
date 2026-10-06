@@ -103,8 +103,10 @@ ctest --test-dir build --output-on-failure   # 头文件 + 模块冒烟测试
 cmake --install build --prefix /your/prefix
 ```
 
-模块门面需要模块工具链（Clang >= 17 / GCC >= 15 + Ninja/VS），不满足时
-CMake 自动退化为纯头文件目标（`-DSERDE_BUILD_CPP23_MODULES=OFF` 可强制关闭）。
+原生模块构建与安装后的模块消费者要求 CMake >= 3.31，并需要
+Clang >= 17 / GCC >= 15 + Ninja/VS。编译器或生成器不支持时只构建头文件目标；
+使用较旧 CMake 时必须设置 `-DSERDE_BUILD_CPP23_MODULES=OFF`。
+安装后消费者使用自己的编译器和选项重建 BMI。
 
 simdjson 后端默认构建为启用 PIC 的静态库，也可链接到下游共享库。
 `-DSERDE_BUILD_SHARED_LIBS=ON` 将后端构建为共享库。
