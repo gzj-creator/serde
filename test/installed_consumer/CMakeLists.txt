@@ -2,6 +2,9 @@ cmake_minimum_required(VERSION 3.28)
 project(serde_installed_consumer LANGUAGES CXX)
 
 find_package(serde CONFIG REQUIRED)
+if(SERDE_EXPECT_NO_MODULES AND TARGET serde::serde-cpp23-modules)
+    message(FATAL_ERROR "Module provider must not be exported when interface installation is disabled")
+endif()
 enable_testing()
 
 if(MSVC)

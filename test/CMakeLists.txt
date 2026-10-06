@@ -31,6 +31,7 @@ add_test(NAME serde_install_consumer
         "-DSERDE_COMPILER=${CMAKE_CXX_COMPILER}"
         "-DSERDE_COMPILER_FLAGS=${CMAKE_CXX_FLAGS}"
         "-DSERDE_CONFIG=$<CONFIG>"
+        "-DSERDE_EXPECT_NO_MODULES=$<NOT:$<BOOL:${SERDE_INSTALL_CPP23_MODULE_INTERFACES}>>"
         "-DSERDE_CTEST_COMMAND=${CMAKE_CTEST_COMMAND}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/install_consumer.cmake")
 set_tests_properties(serde_install_consumer PROPERTIES TIMEOUT 180)

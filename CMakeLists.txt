@@ -224,7 +224,7 @@ write_basic_package_version_file(
     COMPATIBILITY SameMajorVersion
 )
 
-if(SERDE_CPP23_MODULES_EFFECTIVE)
+if(SERDE_CPP23_MODULES_EFFECTIVE AND SERDE_INSTALL_CPP23_MODULE_INTERFACES)
     install(EXPORT serdeTargets
         NAMESPACE serde::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/serde

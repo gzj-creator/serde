@@ -21,6 +21,7 @@ run_checked("${CMAKE_COMMAND}" -S "${work}/source" -B "${work}/build"
     "-DCMAKE_CXX_COMPILER=${SERDE_COMPILER}"
     "-DCMAKE_CXX_FLAGS=${SERDE_COMPILER_FLAGS}"
     "-DCMAKE_BUILD_TYPE=${SERDE_CONFIG}"
+    "-DSERDE_EXPECT_NO_MODULES=${SERDE_EXPECT_NO_MODULES}"
     "-DCMAKE_PREFIX_PATH=${prefix}")
 run_checked("${CMAKE_COMMAND}" --build "${work}/build"
     --config "${SERDE_CONFIG}" --parallel 2)
