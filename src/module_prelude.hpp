@@ -8,7 +8,9 @@
 
 #pragma once
 
+#if defined(__APPLE__) && defined(__MACH__)
 #include "../third_party/fast_float/include/fast_float/fast_float.h"
+#endif
 
 #if __has_include(<algorithm>)
 #include <algorithm>

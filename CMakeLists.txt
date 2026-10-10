@@ -194,10 +194,12 @@ install(DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/simdjson/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/third_party/simdjson
     FILES_MATCHING PATTERN "*.h" PATTERN "*.cpp" PATTERN "*.md"
 )
-install(DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/fast_float/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/third_party/fast_float
-    FILES_MATCHING PATTERN "*.h" PATTERN "LICENSE-*" PATTERN "README.md"
-)
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    install(DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/fast_float/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/third_party/fast_float
+        FILES_MATCHING PATTERN "*.h" PATTERN "LICENSE-*" PATTERN "README.md"
+    )
+endif()
 install(FILES
     ${PROJECT_SOURCE_DIR}/third_party/simdjson/LICENSE.md
     ${PROJECT_SOURCE_DIR}/third_party/simdjson/README.md

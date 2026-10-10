@@ -38,7 +38,7 @@
 #include "../common/common.hpp"
 #endif
 
-#ifndef SERDE_TOML_MODULE_MODE
+#if !defined(SERDE_TOML_MODULE_MODE) && defined(__APPLE__) && defined(__MACH__)
 #if __has_include(<third_party/fast_float/include/fast_float/fast_float.h>)
 #include <third_party/fast_float/include/fast_float/fast_float.h>
 #else
@@ -1694,8 +1694,13 @@ private:
                 floating_text.remove_prefix(1);
             }
             double value = 0.0;
+#if defined(__APPLE__) && defined(__MACH__)
             const auto [end, error] = fast_float::from_chars(
                 floating_text.data(), floating_text.data() + floating_text.size(), value);
+#else
+            const auto [end, error] = std::from_chars(
+                floating_text.data(), floating_text.data() + floating_text.size(), value);
+#endif
             if (error != std::errc{} || end != floating_text.data() + floating_text.size()) {
                 return std::unexpected(
                     std::string("invalid TOML floating-point value: ") + std::string(normalized));
