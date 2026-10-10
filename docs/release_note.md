@@ -126,3 +126,26 @@
 - 本次只发布 serde 数据契约扩展，HTTP/OpenAPI/HTTP2/WebSocket 尚未实施。
   Bazel 和 GCC15 module 未在本机验证；Clang22 验证使用系统 libstdc++及
   `--no-default-config`，不声称默认 mcpp 工具链或其他平台均已通过。
+
+## v0.5.0 - 2026-10-10
+
+- 版本级别：次版本（minor）
+- Git 提交消息：`feat: 发布 JSON 协议字段映射与 Schema 构建 v0.5.0`
+- git tag：`v0.5.0`
+
+### 摘要
+
+自 `v0.4.0` 以来的累计变更：
+
+- **JSON 字段映射**：新增 `FieldPolicy` / `WireField`，支持原始 JSON、缺失字段、空值省略、对象/数组约束、布尔 presence-object 映射与 null 拒绝；原始 optional 值保留显式 null。
+- **值与适配接口**：新增 `RawValue` / `Object`、variant 和动态 `Json` 编解码、`to_wire` / `wire_type` / `from_wire` 适配、`reflect_fields(std::type_identity<T>)` 登记，以及成员/路径解码、对象合并与遍历接口；普通反射与 TOML 保留既有字段契约。
+- **JSON Schema 构建**：新增 `<serde/json/schema.hpp>` 的 `json::SchemaBuilder`，支持标量、数组、枚举、嵌套对象与必填字段，`encode()` 显式返回错误，并导出至 `serde_json` 模块。
+- **生命周期与错误处理**：解码的动态 `Json` 独立持有存储，避免后续解析或借用子视图失效；动态值和原始数组编码执行资源限制，嵌套 Schema 构建错误继续向上报告。
+- **版本同步**：`CMakeLists.txt`、`MODULE.bazel`、`mcpp.toml` 的包版本统一为 `0.5.0`。
+
+### 验收
+
+- Galay serde unit 13/13、安装消费者 1/1；上游无异常配置 6/6、Clang C++ modules 7/7（含 Schema 导出 smoke）通过，覆盖字段策略、variant、动态值生命周期、资源限制及 Schema。
+- 构建与测试均串行执行；解析 benchmark 仅作小规模 smoke，不据此宣称性能改善。
+- 发版时 CMake 重新配置确认生成的包版本为 `0.5.0`，无异常配置 6 项测试串行复跑通过，`git diff --check` 通过；本轮仅变更版本与发布记录，未重复大型构建。
+- 未执行完整 Galay 测试、etcd shared-backend 集成、Bazel 或 mcpp 构建，也未验证其他平台。

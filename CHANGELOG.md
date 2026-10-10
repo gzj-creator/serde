@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-10-10
+
 ### 新增
 
 - 新增 JSON `FieldPolicy` / `WireField`，支持原始值、缺失字段、空值省略、对象/数组约束、布尔 presence-object 映射与 null 拒绝；新增 `RawValue` / `Object`、variant 与动态 `Json` 编解码，以及 `to_wire` / `wire_type` / `from_wire` 适配。
@@ -21,9 +23,14 @@
 
 - 动态 `Json` 解码独立持有存储，避免可复用解析器或借用子视图失效；动态值及原始数组编码执行序列化资源限制，原始 optional 值保留显式 null，嵌套 Schema 构建失败继续向上报告。
 
+### 维护
+
+- `CMakeLists.txt`、`MODULE.bazel`、`mcpp.toml` 的包版本同步为 `0.5.0`，将自 `v0.4.0` 以来的未发布变更归入本版本，并追加对应发布说明。
+
 ### 验证
 
 - 在 Galay 消费者中通过 JSON 字段策略、variant、动态值生命周期、资源限制及 Schema 回归，serde unit 13/13、安装消费者 1/1；上游无异常配置 6/6、Clang C++ modules 7/7（含 Schema 导出 smoke）通过。构建与测试均串行执行，相关解析 benchmark 仅作小规模 smoke；未执行完整 Galay 测试或 etcd shared-backend 集成。
+- 发版时重新配置 CMake，确认生成的包版本为 `0.5.0`；无异常配置 6 项测试串行复跑通过，`git diff --check` 通过。本轮仅变更版本与发布记录，未重复大型构建。
 
 ## [v0.4.0] - 2026-10-06
 
