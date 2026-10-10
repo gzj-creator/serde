@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -91,6 +92,13 @@ bool contract_roundtrip() {
 }  // namespace
 
 int main() {
+    json::SchemaBuilder schema;
+    schema.add_string("name", "Name", true);
+    const auto schema_text = schema.encode();
+    if (!schema_text) return 1;
+    const auto schema_fields = json::deserialize<json::Object>(*schema_text);
+    if (!schema_fields || !schema_fields->contains("properties")) return 1;
+
     entry value{"demo", 3};
     const auto text = json::serialize(value);
     assert(text);

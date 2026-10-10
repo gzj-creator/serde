@@ -467,12 +467,15 @@ concept hasReflectFields = requires(const std::remove_cvref_t<T>& value) {
 };
 
 template <class T>
-concept hasAnyFields = hasReflectFields<T>;
+concept hasAnyFields = hasReflectFields<T> || requires {
+    reflect_fields(std::type_identity<std::remove_cvref_t<T>>{});
+};
 
 template <class T>
-    requires hasReflectFields<T>
+    requires hasAnyFields<T>
 constexpr decltype(auto) getFields(const T& value) {
-    return reflect_fields(value);
+    if constexpr (hasReflectFields<T>) return reflect_fields(value);
+    else return reflect_fields(std::type_identity<std::remove_cvref_t<T>>{});
 }
 
 template <class T>

@@ -16,4 +16,5 @@ export import serde_common;
 #define SERDE_JSON_MODULE_MODE 1
 export extern "C++" {
 #include "json.hpp"
+#include "schema.hpp"
 }

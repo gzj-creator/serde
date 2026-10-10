@@ -269,6 +269,41 @@ using reflect::make_field;
 template <class T>
 concept Reflectable = reflect::Reflectable<T>;
 
+// Wire policies are local to JSON; ordinary reflection and TOML are unaffected.
+struct FieldPolicy {
+    bool raw = false;
+    bool optional = false;
+    bool omit_empty = false;
+    bool omit_false = false;
+    bool object_only = false;
+    bool array_only = false;
+    bool presence_object = false;
+    bool empty_object = false;
+    bool reject_null = false;
+};
+
+struct RawValue {
+    std::string text;
+};
+using Object = std::map<std::string, RawValue>;
+
+template <class Owner, class Member>
+struct WireField {
+    std::string_view name;
+    Member Owner::*pointer;
+    FieldPolicy wire_policy;
+
+    template <class Object>
+    constexpr decltype(auto) get(Object&& object) const noexcept {
+        return std::forward<Object>(object).*pointer;
+    }
+};
+
+template <class Owner, class Member>
+constexpr auto make_field(std::string_view name, Member Owner::*pointer, FieldPolicy policy) {
+    return WireField<Owner, Member>{name, pointer, policy};
+}
+
 template <class T, class Function>
     requires Reflectable<T>
 constexpr void for_each_field(T& value, Function&& function) {
@@ -292,6 +327,11 @@ struct OptionalTraits<std::optional<T>> {
     static constexpr bool value = true;
     using value_type = T;
 };
+
+template <class T>
+struct VariantTraits : std::false_type {};
+template <class... Types>
+struct VariantTraits<std::variant<Types...>> : std::true_type {};
 
 template <class T>
 struct VectorTraits {
@@ -573,6 +613,43 @@ template <class T>
 result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t depth);
 
 template <class T>
+result<Node> encodeRawValue(const T& input, EncodeContext& context, std::size_t depth) {
+    using U = BareT<T>;
+    if constexpr (OptionalTraits<U>::value) {
+        if (!input) return encodeValue(nullptr, context, depth);
+        return encodeRawValue(*input, context, depth);
+    } else if constexpr (VectorTraits<U>::value) {
+        if (depth >= context.options.max_depth)
+            return std::unexpected(std::string("JSON nesting depth exceeds configured limit"));
+        if (context.nodes >= context.options.max_nodes)
+            return std::unexpected(std::string("JSON node count exceeds configured limit"));
+        if (input.size() > context.options.max_array_items)
+            return std::unexpected(std::string("JSON array item count exceeds configured limit"));
+        ++context.nodes;
+        Node::array values;
+        for (const auto& item : input) {
+            auto value = encodeRawValue(item, context, depth + 1);
+            if (!value) return std::unexpected(value.error());
+            values.push_back(std::move(*value));
+        }
+        return Node{std::move(values)};
+    } else if constexpr (std::convertible_to<U, std::string_view>) {
+        auto parsed = json::parse(std::string_view(input));
+        if (!parsed) return std::unexpected(parsed.error());
+        return encodeValue(*parsed, context, depth);
+    } else {
+        return std::unexpected(std::string("raw field must contain serialized JSON"));
+    }
+}
+
+template <class T>
+bool emptyFieldValue(const T& value) {
+    if constexpr (OptionalTraits<BareT<T>>::value) return !value;
+    else if constexpr (requires { value.empty(); }) return value.empty();
+    else return false;
+}
+
+template <class T>
 result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t depth) {
     using U = BareT<T>;
     if (depth >= context.options.max_depth) {
@@ -583,7 +660,57 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
     }
     ++context.nodes;
 
-    if constexpr (OptionalTraits<U>::value) {
+    if constexpr (std::same_as<U, RawValue>) {
+        --context.nodes;
+        return encodeRawValue(input.text, context, depth);
+    } else if constexpr (requires { to_wire(input); }) {
+        --context.nodes;
+        return encodeValue(to_wire(input), context, depth);
+    } else if constexpr (VariantTraits<U>::value) {
+        --context.nodes;
+        return std::visit([&](const auto& value) { return encodeValue(value, context, depth); }, input);
+    } else if constexpr (std::same_as<U, Json>) {
+        if (!input.valid()) return std::unexpected(std::string("invalid JSON value"));
+        if (input.is_null()) return Node{};
+        if (input.is_bool()) return Node{*input.as_bool()};
+        if (input.is_string()) {
+            const auto value = input.as_string();
+            if (!value) return std::unexpected(value.error());
+            if (value->size() > context.options.max_string_bytes || !valid_utf8(*value))
+                return std::unexpected(std::string("invalid or oversized UTF-8 JSON string"));
+            return Node{std::string(*value)};
+        }
+        if (auto value = input.as_int64(); value) return Node{*value};
+        if (auto value = input.as_uint64(); value) return Node{*value};
+        if (auto value = input.as_double(); value) return Node{*value};
+        if (input.is_array()) {
+            if (input.size() > context.options.max_array_items)
+                return std::unexpected(std::string("JSON array item count exceeds configured limit"));
+            Node::array values;
+            auto status = input.for_each_element([&](const Json& item) -> result<void> {
+                auto encoded = encodeValue(item, context, depth + 1);
+                if (!encoded) return std::unexpected(encoded.error());
+                values.push_back(std::move(*encoded));
+                return {};
+            });
+            if (!status) return std::unexpected(status.error());
+            return Node{std::move(values)};
+        }
+        if (input.size() > context.options.max_object_members)
+            return std::unexpected(std::string("JSON object member count exceeds configured limit"));
+        Node::object values;
+        auto status = input.for_each_member([&](std::string_view key, const Json& item) -> result<void> {
+            auto encoded = encodeValue(item, context, depth + 1);
+            if (!encoded) return std::unexpected(encoded.error());
+            if (key.size() > context.options.max_key_bytes || !valid_utf8(key))
+                return std::unexpected(std::string("invalid or oversized UTF-8 JSON object key"));
+            if (!values.emplace(std::string(key), std::move(*encoded)).second)
+                return std::unexpected(std::string("duplicate JSON object key"));
+            return {};
+        });
+        if (!status) return std::unexpected(status.error());
+        return Node{std::move(values)};
+    } else if constexpr (OptionalTraits<U>::value) {
         using Member = typename OptionalTraits<U>::value_type;
         if constexpr (reflect::EnumReflectable<Member>) {
             if (auto checked = reflect::validate_enum_descriptor<Member>(); !checked) {
@@ -627,6 +754,8 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
             return std::unexpected(std::string("invalid or oversized UTF-8 JSON string"));
         }
         return Node{std::string(input)};
+    } else if constexpr (std::convertible_to<const T&, std::string_view>) {
+        return encodeValue(std::string_view(input), context, depth);
     } else if constexpr (std::same_as<U, std::nullptr_t>) {
         return Node{};
     } else if constexpr (std::same_as<U, bool>) {
@@ -731,6 +860,13 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
             if (failed) {
                 return;
             }
+            if constexpr (requires { descriptor.wire_policy; }) {
+                if (descriptor.wire_policy.omit_empty && emptyFieldValue(descriptor.get(object))) return;
+                if constexpr (std::same_as<BareT<decltype(descriptor.get(object))>, bool>) {
+                    if ((descriptor.wire_policy.omit_false || descriptor.wire_policy.presence_object) &&
+                        !descriptor.get(object)) return;
+                }
+            }
             if (descriptor.name.size() > context.options.max_key_bytes ||
                 !valid_utf8(descriptor.name)) {
                 failed = true;
@@ -744,7 +880,38 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
                     return;
                 }
             }
-            auto encoded = encodeValue(descriptor.get(object), context, depth + 1);
+            auto encoded = [&]() -> result<Node> {
+                if constexpr (requires { descriptor.wire_policy; }) {
+                    if constexpr (std::same_as<BareT<decltype(descriptor.get(object))>, bool>) {
+                        if (descriptor.wire_policy.presence_object) return Node{Node::object{}};
+                    }
+                    if (descriptor.wire_policy.raw) {
+                        if constexpr (std::convertible_to<BareT<decltype(descriptor.get(object))>, std::string_view>) {
+                            if (descriptor.wire_policy.empty_object && descriptor.get(object).empty())
+                                return Node{Node::object{}};
+                        }
+                        auto value = encodeRawValue(descriptor.get(object), context, depth + 1);
+                        if (!value) return value;
+                        const Node* checked = &*value;
+                        if constexpr (VectorTraits<BareT<decltype(descriptor.get(object))>>::value) {
+                            if (descriptor.wire_policy.object_only) {
+                                for (const auto& item : std::get<Node::array>(checked->value)) {
+                                    if (!std::holds_alternative<Node::object>(item.value))
+                                        return std::unexpected(std::string("raw array item must be an object"));
+                                }
+                            }
+                        } else if (descriptor.wire_policy.object_only &&
+                                   !std::holds_alternative<Node::object>(checked->value)) {
+                            return std::unexpected(std::string("raw field must be an object"));
+                        }
+                        if (descriptor.wire_policy.array_only &&
+                            !std::holds_alternative<Node::array>(checked->value))
+                            return std::unexpected(std::string("raw field must be an array"));
+                        return value;
+                    }
+                }
+                return encodeValue(descriptor.get(object), context, depth + 1);
+            }();
             if (!encoded) {
                 failed = true;
                 failure = encoded.error();
@@ -966,6 +1133,71 @@ struct DuplicateKeyScan {
 template <class T>
 result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options);
 
+inline result<std::string> rawValueText(const Json& input) {
+    const SerializeOptions options{};
+    EncodeContext context{options};
+    auto node = encodeValue(input, context, 0);
+    if (!node) return std::unexpected(node.error());
+    Writer output{{}, options.max_output_bytes};
+    std::string failure;
+    if (!appendValue(*node, output, options, 0, failure))
+        return std::unexpected(failure.empty() ? std::string("JSON output exceeds configured size limit") : failure);
+    return std::move(output.output);
+}
+
+template <class T>
+result<T> decodeRawValue(const Json& input) {
+    using U = BareT<T>;
+    if constexpr (OptionalTraits<U>::value) {
+        // A present null is still a raw value; absence is handled by the field decoder.
+        auto value = decodeRawValue<typename OptionalTraits<U>::value_type>(input);
+        if (!value) return std::unexpected(value.error());
+        return U{std::move(*value)};
+    } else if constexpr (VectorTraits<U>::value) {
+        U values;
+        auto status = input.for_each_element([&](const Json& item) -> result<void> {
+            auto value = decodeRawValue<typename VectorTraits<U>::value_type>(item);
+            if (!value) return std::unexpected(value.error());
+            values.push_back(std::move(*value));
+            return {};
+        });
+        if (!status) return std::unexpected(status.error());
+        return values;
+    } else if constexpr (std::same_as<U, std::string>) {
+        return rawValueText(input);
+    } else {
+        return std::unexpected(std::string("raw field must contain serialized JSON"));
+    }
+}
+
+template <class Member, class Descriptor>
+result<Member> decodeWireField(const Descriptor& descriptor, const Json& input,
+                               const ParseOptions& options) {
+    if constexpr (requires { descriptor.wire_policy; }) {
+        if (descriptor.wire_policy.reject_null && input.is_null())
+            return std::unexpected(std::string("value must not be null"));
+        if constexpr (std::same_as<Member, bool>) {
+            if (descriptor.wire_policy.presence_object) return input.valid() && !input.is_null();
+        }
+        if (descriptor.wire_policy.object_only) {
+            if constexpr (VectorTraits<Member>::value) {
+                if (!input.is_array()) return std::unexpected(std::string("value must be an array"));
+                auto checked = input.for_each_element([](const Json& item) -> result<void> {
+                    if (!item.is_object()) return std::unexpected(std::string("array item must be an object"));
+                    return {};
+                });
+                if (!checked) return std::unexpected(checked.error());
+            } else if (!input.is_object()) {
+                return std::unexpected(std::string("value must be an object"));
+            }
+        }
+        if (descriptor.wire_policy.array_only && !input.is_array())
+            return std::unexpected(std::string("value must be an array"));
+        if (descriptor.wire_policy.raw) return decodeRawValue<Member>(input);
+    }
+    return decodeValue<Member>(input, {}, options);
+}
+
 template <class Member, class Descriptor>
 result<Member> decodeFieldValue(
     const Descriptor& descriptor, const Json& input, const ParseOptions& options);
@@ -1116,7 +1348,7 @@ result<Member> decodeFieldValue(const Descriptor& descriptor, const Json& input,
         }
         return std::unexpected("value is missing field '" + std::string(descriptor.name) + "'");
     }
-    auto decoded = decodeValue<Member>(input, {}, options);
+    auto decoded = decodeWireField<Member>(descriptor, input, options);
     if (!decoded) {
         return std::unexpected(rebaseDecodeError(decoded.error(), memberDecodePath("value", descriptor.name)));
     }
@@ -1193,6 +1425,9 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
                 if constexpr (use_index) return (members[Index]);
                 else return input.at(descriptor.name);
             }();
+            if constexpr (requires { descriptor.wire_policy; }) {
+                if (!member.valid() && descriptor.wire_policy.optional) return;
+            }
             if constexpr (OptionalTraits<Member>::value) {
                 if (!member.valid()) {
                     if constexpr (validate) decoded = validateFieldValue(descriptor, descriptor.get(output));
@@ -1202,7 +1437,7 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
                 decoded = std::unexpected("value is missing field '" + std::string(descriptor.name) + "'");
                 return;
             }
-            auto value = decodeValue<Member>(member, {}, options);
+            auto value = decodeWireField<Member>(descriptor, member, options);
             if (!value) {
                 decoded = std::unexpected(rebaseDecodeError(value.error(), memberDecodePath("value", descriptor.name)));
                 return;
@@ -1247,7 +1482,31 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
     using U = BareT<T>;
     const LazyWhere where{path};
 
-    if constexpr (OptionalTraits<U>::value) {
+    if constexpr (std::same_as<U, RawValue>) {
+        auto raw = rawValueText(input);
+        if (!raw) return std::unexpected(raw.error());
+        return RawValue{std::move(*raw)};
+    } else if constexpr (requires { wire_type(std::type_identity<U>{}); }) {
+        using Wire = typename decltype(wire_type(std::type_identity<U>{}))::type;
+        auto decoded = decodeValue<Wire>(input, path, options);
+        if (!decoded) return std::unexpected(decoded.error());
+        return from_wire(std::type_identity<U>{}, std::move(*decoded));
+    } else if constexpr (VariantTraits<U>::value) {
+        result<U> output = std::unexpected(where + " does not match any variant alternative");
+        [&]<std::size_t... Index>(std::index_sequence<Index...>) {
+            ([&] {
+                if (output) return;
+                auto value = decodeValue<std::variant_alternative_t<Index, U>>(input, path, options);
+                if (value) output = U{std::in_place_index<Index>, std::move(*value)};
+            }(), ...);
+        }(std::make_index_sequence<std::variant_size_v<U>>{});
+        return output;
+    } else if constexpr (std::same_as<U, Json>) {
+        // Decoded values must outlive the reusable parser and borrowed child views.
+        auto raw = rawValueText(input);
+        if (!raw) return std::unexpected(raw.error());
+        return json::parse(*raw, options);
+    } else if constexpr (OptionalTraits<U>::value) {
         using Member = typename OptionalTraits<U>::value_type;
         if constexpr (reflect::EnumReflectable<Member>) {
             if (auto checked = reflect::validate_enum_descriptor<Member>(); !checked) {
@@ -1686,6 +1945,27 @@ result<T> decode(const Json& value, const ParseOptions& options = {}) {
     return detail::decodeValue<T>(value, {}, options);
 }
 
+template <class T>
+result<T> decode_member(const Json& value, std::string_view name, const ParseOptions& options = {}) {
+    if (!value.is_object()) return std::unexpected(std::string("value must be an object"));
+    const auto member = value.at(name);
+    if (!member.valid()) {
+        if constexpr (detail::OptionalTraits<T>::value) return T{};
+        return std::unexpected("value is missing field '" + std::string(name) + "'");
+    }
+    return detail::decodeValue<T>(member, detail::memberDecodePath("value", name), options);
+}
+
+inline const Json& empty_object() {
+    static const Json value = [] {
+        auto parsed = parse("{}");
+        // A fixed valid document has no recoverable syntax or validation failure.
+        if (!parsed) std::terminate();
+        return std::move(*parsed);
+    }();
+    return value;
+}
+
 /// A missing optional returns an empty value: this function has no owner default.
 template <class Owner, class Member, bool HasOptions>
 result<std::remove_cvref_t<Member>> decode_field(const reflect::field<Owner, Member, HasOptions>& descriptor,
@@ -1733,6 +2013,65 @@ result<T> deserialize(std::string_view text, const ParseOptions& options = {}) {
         }
     }
     return decode<T>(*parsed, options);
+}
+
+template <class T>
+result<T> deserialize_member(std::string_view text, std::string_view name, const ParseOptions& options = {}) {
+    auto parsed = parse(text, options);
+    if (!parsed) return std::unexpected(parsed.error());
+    return decode_member<T>(*parsed, name, options);
+}
+
+inline result<std::string> merge_objects(std::string_view text, const Object& replacements) {
+    auto object = deserialize<Object>(text);
+    if (!object) return std::unexpected(object.error());
+    for (const auto& [key, value] : replacements) object->insert_or_assign(key, value);
+    return serialize(*object);
+}
+
+template <class T>
+result<T> decode_path(const Json& root, const std::vector<std::string>& path) {
+    Json value = root;
+    for (const auto& key : path) {
+        if (!value.is_object()) {
+            if constexpr (detail::OptionalTraits<T>::value) return T{};
+            return std::unexpected(std::string("value path traverses a non-object"));
+        }
+        value = value.at(key);
+        if (!value.valid()) {
+            if constexpr (detail::OptionalTraits<T>::value) return T{};
+            return std::unexpected(std::string("value path is missing"));
+        }
+    }
+    return decode<T>(value);
+}
+
+template <class Function>
+result<void> visit_objects(std::string_view text, Function&& function) {
+    auto root = parse(text);
+    if (!root) return std::unexpected(root.error());
+    std::vector<std::string> path;
+    auto visit = [&](auto&& self, const Json& value) -> result<void> {
+        if (value.is_object()) {
+            if (auto status = function(value, path); !status) return status;
+            return value.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
+                path.emplace_back(key);
+                auto status = self(self, child);
+                path.pop_back();
+                return status;
+            });
+        }
+        if (value.is_array()) {
+            return value.for_each_element([&](const Json& child) -> result<void> {
+                path.emplace_back();
+                auto status = self(self, child);
+                path.pop_back();
+                return status;
+            });
+        }
+        return {};
+    };
+    return visit(visit, *root);
 }
 
 }  // namespace json
