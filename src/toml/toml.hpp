@@ -38,6 +38,14 @@
 #include "../common/common.hpp"
 #endif
 
+#ifndef SERDE_TOML_MODULE_MODE
+#if __has_include(<third_party/fast_float/include/fast_float/fast_float.h>)
+#include <third_party/fast_float/include/fast_float/fast_float.h>
+#else
+#include "../../third_party/fast_float/include/fast_float/fast_float.h"
+#endif
+#endif
+
 namespace toml {
 
 /**
@@ -1686,9 +1694,8 @@ private:
                 floating_text.remove_prefix(1);
             }
             double value = 0.0;
-            const auto [end, error] = std::from_chars(
-                floating_text.data(), floating_text.data() + floating_text.size(), value,
-                std::chars_format::general);
+            const auto [end, error] = fast_float::from_chars(
+                floating_text.data(), floating_text.data() + floating_text.size(), value);
             if (error != std::errc{} || end != floating_text.data() + floating_text.size()) {
                 return std::unexpected(
                     std::string("invalid TOML floating-point value: ") + std::string(normalized));

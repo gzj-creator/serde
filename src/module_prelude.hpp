@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "../third_party/fast_float/include/fast_float/fast_float.h"
+
 #if __has_include(<algorithm>)
 #include <algorithm>
 #endif
