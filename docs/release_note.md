@@ -149,3 +149,22 @@
 - 构建与测试均串行执行；解析 benchmark 仅作小规模 smoke，不据此宣称性能改善。
 - 发版时 CMake 重新配置确认生成的包版本为 `0.5.0`，无异常配置 6 项测试串行复跑通过，`git diff --check` 通过；本轮仅变更版本与发布记录，未重复大型构建。
 - 未执行完整 Galay 测试、etcd shared-backend 集成、Bazel 或 mcpp 构建，也未验证其他平台。
+
+## v0.5.1 - 2026-10-11
+
+- 版本级别：修订版本（patch，小版本）
+- Git 提交消息：`fix: 固定 mcpp 包命名空间并发布 v0.5.1`
+- git tag：`v0.5.1`
+
+### 摘要
+
+自 `v0.5.0` 以来的累计变更：
+
+- **固定包身份**：mcpp 清单显式声明 `namespace = "gzj-creator"`，源码引用和生成的包描述统一为 `gzj-creator.serde`，不随机器或安装目录改变。
+- **macOS TOML 浮点修复**：收束已有两个修复提交，仅 macOS 使用随源分发的 fast_float，其他平台继续使用 `std::from_chars`；CMake 安装与 Bazel 依赖按平台启用。
+- **版本同步**：CMake、Bazel、mcpp 包版本统一为 `0.5.1`，解析接口和错误契约保持不变。
+
+### 验收
+
+- Linux 无异常配置增量构建及全部 7 项 CTest 通过，包含安装消费者；生成的 CMake 包版本为 `0.5.1`。
+- `mcpp emit xpkg` 自动生成 `gzj-creator.serde@0.5.1`，`git diff --check` 通过；本轮未重跑 macOS 或 Bazel 构建。

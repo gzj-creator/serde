@@ -11,6 +11,21 @@
 
 ## [Unreleased]
 
+## [v0.5.1] - 2026-10-11
+
+### 修复
+
+- mcpp 清单显式声明 `namespace = "gzj-creator"`，源码引用和生成的包描述统一识别为 `gzj-creator.serde`，避免安装位置或依赖键改变包身份。
+- 收束 `v0.5.0` 后的 macOS TOML 浮点解析修复：仅 macOS 使用随源分发的 fast_float，其他平台继续使用 `std::from_chars`；CMake 安装和 Bazel 依赖按平台启用。
+
+### 维护
+
+- CMake、Bazel、mcpp 包版本统一为 `0.5.1`，保留已有解析接口和错误契约。
+
+### 验证
+
+- Linux 无异常配置增量构建和全部 7 项 CTest 通过，包含安装消费者；生成的 CMake 包版本为 `0.5.1`，`mcpp emit xpkg` 自动生成 `gzj-creator.serde@0.5.1`，`git diff --check` 通过。本轮未重跑 macOS 或 Bazel 构建。
+
 ## [v0.5.0] - 2026-10-10
 
 ### 新增
