@@ -49,7 +49,7 @@
 // 模块门面经 `export import reflect` / `export import common` 提供依赖词汇，
 // 头文件形态自包含。JSON 不依赖 toml 模块。
 #ifndef SERDE_JSON_MODULE_MODE
-#include "../reflect/reflect.hpp"
+#include "../reflect/detail/object_fields.hpp"
 #include "../common/common.hpp"
 #endif
 
@@ -313,6 +313,10 @@ constexpr void for_each_field(T& value, Function&& function) {
 }  // namespace json
 
 namespace json::detail {
+
+using reflect::detail::MappedObject;
+using reflect::detail::ObjectMapping;
+using reflect::detail::StaticMappedObject;
 
 template <class T>
 using BareT = std::remove_cvref_t<T>;
@@ -609,7 +613,7 @@ struct EncodeContext {
     std::size_t nodes = 0;
 };
 
-template <class T>
+template <ObjectMapping Mapping = ObjectMapping::kExplicitOnly, class T>
 result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t depth);
 
 template <class T>
@@ -649,7 +653,7 @@ bool emptyFieldValue(const T& value) {
     else return false;
 }
 
-template <class T>
+template <ObjectMapping Mapping, class T>
 result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t depth) {
     using U = BareT<T>;
     if (depth >= context.options.max_depth) {
@@ -665,10 +669,10 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
         return encodeRawValue(input.text, context, depth);
     } else if constexpr (requires { to_wire(input); }) {
         --context.nodes;
-        return encodeValue(to_wire(input), context, depth);
+        return encodeValue<ObjectMapping::kExplicitOnly>(to_wire(input), context, depth);
     } else if constexpr (VariantTraits<U>::value) {
         --context.nodes;
-        return std::visit([&](const auto& value) { return encodeValue(value, context, depth); }, input);
+        return std::visit([&](const auto& value) { return encodeValue<Mapping>(value, context, depth); }, input);
     } else if constexpr (std::same_as<U, Json>) {
         if (!input.valid()) return std::unexpected(std::string("invalid JSON value"));
         if (input.is_null()) return Node{};
@@ -720,9 +724,9 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
         if (!input) {
             return Node{};
         }
-        return encodeValue(*input, context, depth + 1);
+        return encodeValue<Mapping>(*input, context, depth + 1);
     } else if constexpr (InlineTableTraits<U>::value) {
-        return encodeValue(input.value, context, depth + 1);
+        return encodeValue<Mapping>(input.value, context, depth + 1);
     } else if constexpr (std::same_as<U, date>) {
         if (!valid_date_value(input)) {
             return std::unexpected(std::string("invalid json::date value"));
@@ -811,9 +815,9 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
             using Element = typename VectorTraits<U>::value_type;
             auto encoded = [&]() {
                 if constexpr (std::constructible_from<Element, decltype(element)>) {
-                    return encodeValue(static_cast<Element>(element), context, depth + 1);
+                    return encodeValue<Mapping>(static_cast<Element>(element), context, depth + 1);
                 } else {
-                    return encodeValue(element, context, depth + 1);
+                    return encodeValue<Mapping>(element, context, depth + 1);
                 }
             }();
             if (!encoded) {
@@ -829,7 +833,7 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
         Node::array values;
         values.reserve(ArrayTraits<U>::size);
         for (const auto& element : input) {
-            auto encoded = encodeValue(element, context, depth + 1);
+            auto encoded = encodeValue<Mapping>(element, context, depth + 1);
             if (!encoded) {
                 return std::unexpected(encoded.error());
             }
@@ -845,18 +849,18 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
             if (key.size() > context.options.max_key_bytes || !valid_utf8(key)) {
                 return std::unexpected(std::string("invalid or oversized UTF-8 JSON object key"));
             }
-            auto encoded = encodeValue(element, context, depth + 1);
+            auto encoded = encodeValue<Mapping>(element, context, depth + 1);
             if (!encoded) {
                 return std::unexpected(encoded.error());
             }
             values.emplace(key, std::move(*encoded));
         }
         return Node{std::move(values)};
-    } else if constexpr (Reflectable<U>) {
+    } else if constexpr (MappedObject<U, Mapping>) {
         Node::object values;
         std::string failure;
         bool failed = false;
-        for_each_field(input, [&](const auto& descriptor, const auto& object) {
+        reflect::detail::for_each_object_field(input, [&](const auto& descriptor, const auto& object) {
             if (failed) {
                 return;
             }
@@ -910,7 +914,8 @@ result<Node> encodeValue(const T& input, EncodeContext& context, std::size_t dep
                         return value;
                     }
                 }
-                return encodeValue(descriptor.get(object), context, depth + 1);
+                return encodeValue<reflect::detail::object_member_mapping<U>>(
+                    descriptor.get(object), context, depth + 1);
             }();
             if (!encoded) {
                 failed = true;
@@ -1130,7 +1135,7 @@ struct DuplicateKeyScan {
     }
 };
 
-template <class T>
+template <class T, ObjectMapping Mapping = ObjectMapping::kExplicitOnly>
 result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options);
 
 inline result<std::string> rawValueText(const Json& input) {
@@ -1170,7 +1175,7 @@ result<T> decodeRawValue(const Json& input) {
     }
 }
 
-template <class Member, class Descriptor>
+template <class Member, ObjectMapping Mapping = ObjectMapping::kExplicitOnly, class Descriptor>
 result<Member> decodeWireField(const Descriptor& descriptor, const Json& input,
                                const ParseOptions& options) {
     if constexpr (requires { descriptor.wire_policy; }) {
@@ -1195,7 +1200,7 @@ result<Member> decodeWireField(const Descriptor& descriptor, const Json& input,
             return std::unexpected(std::string("value must be an array"));
         if (descriptor.wire_policy.raw) return decodeRawValue<Member>(input);
     }
-    return decodeValue<Member>(input, {}, options);
+    return decodeValue<Member, Mapping>(input, {}, options);
 }
 
 template <class Member, class Descriptor>
@@ -1278,9 +1283,8 @@ constexpr auto indexedFieldNames(const Fields& descriptors) {
     return names;
 }
 
-template <class T>
-    requires reflect::StaticReflectable<T>
-inline constexpr auto staticFieldNames = indexedFieldNames(reflect::static_fields<T>());
+template <StaticMappedObject T>
+inline constexpr auto staticFieldNames = indexedFieldNames(reflect::detail::static_object_fields<T>());
 
 constexpr std::size_t fieldNameHash(std::string_view name) {
     std::uint64_t hash = 14695981039346656037ULL;
@@ -1318,8 +1322,7 @@ struct StaticFieldLookup {
     }
 };
 
-template <class T>
-    requires reflect::StaticReflectable<T>
+template <StaticMappedObject T>
 inline constexpr auto staticFieldLookup = StaticFieldLookup{staticFieldNames<T>};
 
 struct AllFields {
@@ -1362,8 +1365,8 @@ template <class T, class Selector>
 result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
                              const ParseOptions& options) {
     if (!input.is_object()) return std::unexpected(std::string("value must be a JSON object"));
-    using Fields = BareT<decltype(reflect::fields(std::declval<T&>()))>;
-    const auto& descriptors = reflect::fields(output);
+    using Fields = BareT<decltype(reflect::detail::object_fields(std::declval<T&>()))>;
+    const auto& descriptors = reflect::detail::object_fields(output);
     constexpr std::size_t field_count = std::tuple_size_v<Fields>;
     constexpr bool select_all = std::same_as<BareT<Selector>, AllFields>;
     std::array<bool, select_all ? 0 : field_count> selected{};
@@ -1375,17 +1378,17 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
     }
     // Keep the existing indexed lookup for larger objects; small ones read directly.
     constexpr bool use_index = field_count > 16 ||
-        (field_count == 16 && reflect::StaticReflectable<T>);
+        (field_count == 16 && StaticMappedObject<T>);
     std::array<Json, use_index ? field_count : 0> members{};
     if constexpr (use_index) {
         const auto& names = [&]() -> decltype(auto) {
-            if constexpr (reflect::StaticReflectable<T>) return (staticFieldNames<T>);
+            if constexpr (StaticMappedObject<T>) return (staticFieldNames<T>);
             else return indexedFieldNames(descriptors);
         }();
         const auto walked = input.for_each_member(
             [&](std::string_view key, const Json& child) -> result<void> {
                 auto found = [&]() {
-                    if constexpr (reflect::StaticReflectable<T>) {
+                    if constexpr (StaticMappedObject<T>) {
                         return names.begin() + staticFieldLookup<T>.find(key, names);
                     } else {
                         return std::lower_bound(names.begin(), names.end(), key,
@@ -1413,7 +1416,9 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
         using Member = BareT<decltype(descriptor.get(output))>;
         using Descriptor = BareT<decltype(descriptor)>;
         constexpr bool validate = [] {
-            if constexpr (requires { typename std::bool_constant<Descriptor::options.empty()>; }) {
+            if constexpr (!Reflectable<T>) {
+                return false;
+            } else if constexpr (requires { typename std::bool_constant<Descriptor::options.empty()>; }) {
                 return !Descriptor::options.empty() ||
                        reflect::EnumReflectable<reflect::detail::optional_value_t<Member>>;
             } else return true;
@@ -1437,7 +1442,8 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
                 decoded = std::unexpected("value is missing field '" + std::string(descriptor.name) + "'");
                 return;
             }
-            auto value = decodeWireField<Member>(descriptor, member, options);
+            auto value = decodeWireField<Member, reflect::detail::object_member_mapping<T>>(
+                descriptor, member, options);
             if (!value) {
                 decoded = std::unexpected(rebaseDecodeError(value.error(), memberDecodePath("value", descriptor.name)));
                 return;
@@ -1456,11 +1462,11 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
     if (options.unknown_fields == UnknownFieldPolicy::reject) {
         // A selection mask must keep the descriptor order used before assignment.
         const auto& known_descriptors = [&]() -> decltype(auto) {
-            if constexpr (select_all) return reflect::fields(output);
+            if constexpr (select_all) return reflect::detail::object_fields(output);
             else return (descriptors);
         }();
         const auto& names = [&]() -> decltype(auto) {
-            if constexpr (reflect::StaticReflectable<T>) return (staticFieldNames<T>);
+            if constexpr (StaticMappedObject<T>) return (staticFieldNames<T>);
             else return indexedFieldNames(known_descriptors);
         }();
         const auto walked = input.for_each_member([&](std::string_view key, const Json&) -> result<void> {
@@ -1477,7 +1483,7 @@ result<void> decodeFieldsInto(const Json& input, T& output, Selector&& selector,
     return {};
 }
 
-template <class T>
+template <class T, ObjectMapping Mapping>
 result<T> decodeValue(const Json& input, std::string_view path, const ParseOptions& options) {
     using U = BareT<T>;
     const LazyWhere where{path};
@@ -1488,7 +1494,7 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         return RawValue{std::move(*raw)};
     } else if constexpr (requires { wire_type(std::type_identity<U>{}); }) {
         using Wire = typename decltype(wire_type(std::type_identity<U>{}))::type;
-        auto decoded = decodeValue<Wire>(input, path, options);
+        auto decoded = decodeValue<Wire, ObjectMapping::kExplicitOnly>(input, path, options);
         if (!decoded) return std::unexpected(decoded.error());
         return from_wire(std::type_identity<U>{}, std::move(*decoded));
     } else if constexpr (VariantTraits<U>::value) {
@@ -1496,7 +1502,7 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         [&]<std::size_t... Index>(std::index_sequence<Index...>) {
             ([&] {
                 if (output) return;
-                auto value = decodeValue<std::variant_alternative_t<Index, U>>(input, path, options);
+                auto value = decodeValue<std::variant_alternative_t<Index, U>, Mapping>(input, path, options);
                 if (value) output = U{std::in_place_index<Index>, std::move(*value)};
             }(), ...);
         }(std::make_index_sequence<std::variant_size_v<U>>{});
@@ -1516,11 +1522,11 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         if (input.is_null()) {
             return U{};
         }
-        auto decoded = decodeValue<typename OptionalTraits<U>::value_type>(input, path, options);
+        auto decoded = decodeValue<Member, Mapping>(input, path, options);
         if (!decoded) return std::unexpected(decoded.error());
         return U{std::move(*decoded)};
     } else if constexpr (InlineTableTraits<U>::value) {
-        auto decoded = decodeValue<typename InlineTableTraits<U>::value_type>(input, path, options);
+        auto decoded = decodeValue<typename InlineTableTraits<U>::value_type, Mapping>(input, path, options);
         if (!decoded) return std::unexpected(decoded.error());
         return U{std::move(*decoded)};
     } else if constexpr (std::is_enum_v<U>) {
@@ -1648,7 +1654,7 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         std::size_t index = 0;
         std::string failure;
         const auto walked = input.for_each_element([&](const Json& child) -> result<void> {
-            auto decoded = decodeValue<typename VectorTraits<U>::value_type>(child, {}, options);
+            auto decoded = decodeValue<typename VectorTraits<U>::value_type, Mapping>(child, {}, options);
             if (!decoded) {
                 failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where.view(), index));
                 return std::unexpected(failure);
@@ -1667,7 +1673,7 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         std::size_t index = 0;
         std::string failure;
         const auto walked = input.for_each_element([&](const Json& child) -> result<void> {
-            auto decoded = decodeValue<typename ArrayTraits<U>::value_type>(child, {}, options);
+            auto decoded = decodeValue<typename ArrayTraits<U>::value_type, Mapping>(child, {}, options);
             if (!decoded) {
                 failure = rebaseDecodeError(decoded.error(), indexedDecodePath(where.view(), index));
                 return std::unexpected(failure);
@@ -1683,7 +1689,7 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         U output;
         std::string failure;
         const auto walked = input.for_each_member([&](std::string_view key, const Json& child) -> result<void> {
-            auto decoded = decodeValue<typename MapTraits<U>::mapped_type>(child, {}, options);
+            auto decoded = decodeValue<typename MapTraits<U>::mapped_type, Mapping>(child, {}, options);
             if (!decoded) {
                 failure = rebaseDecodeError(decoded.error(), memberDecodePath(where.view(), key));
                 return std::unexpected(failure);
@@ -1693,7 +1699,7 @@ result<T> decodeValue(const Json& input, std::string_view path, const ParseOptio
         });
         if (!walked) return std::unexpected(std::move(failure));
         return output;
-    } else if constexpr (Reflectable<U>) {
+    } else if constexpr (MappedObject<U, Mapping>) {
         if (!input.is_object()) return std::unexpected(where + " must be a JSON object");
         if constexpr (!std::is_default_constructible_v<U>) {
             return std::unexpected(where + " is not default constructible");
@@ -1929,7 +1935,7 @@ result<std::string> serialize(const T& value, const SerializeOptions& options = 
         return std::unexpected(std::string("JSON indent width exceeds configured limit"));
     }
     detail::EncodeContext context{options};
-    auto encoded = detail::encodeValue(value, context, 0);
+    auto encoded = detail::encodeValue<detail::ObjectMapping::kAllowAggregate>(value, context, 0);
     if (!encoded) return std::unexpected(encoded.error());
     detail::Writer output{{}, options.max_output_bytes};
     std::string failure;
@@ -1942,7 +1948,7 @@ result<std::string> serialize(const T& value, const SerializeOptions& options = 
 
 template <class T>
 result<T> decode(const Json& value, const ParseOptions& options = {}) {
-    return detail::decodeValue<T>(value, {}, options);
+    return detail::decodeValue<T, detail::ObjectMapping::kAllowAggregate>(value, {}, options);
 }
 
 template <class T>

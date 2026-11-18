@@ -17,6 +17,12 @@ import toml;
 
 #include <serde/reflect/reflect_macros.hpp>
 
+struct PlainEntry {
+    std::string name;
+    int count{};
+    bool operator==(const PlainEntry&) const = default;
+};
+
 namespace {
 
 struct entry {
@@ -92,6 +98,13 @@ bool contract_roundtrip() {
 }  // namespace
 
 int main() {
+    const PlainEntry plain{"demo", 3};
+    const auto plain_json = json::serialize(plain);
+    const auto plain_toml = toml::serialize(plain);
+    if (!plain_json || !plain_toml) return 1;
+    if (json::deserialize<PlainEntry>(*plain_json) != plain ||
+        toml::deserialize<PlainEntry>(*plain_toml) != plain) return 1;
+
     json::SchemaBuilder schema;
     schema.add_string("name", "Name", true);
     const auto schema_text = schema.encode();

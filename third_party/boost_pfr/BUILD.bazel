@@ -1,0 +1,9 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "boost_pfr",
+    hdrs = glob(["include/**/*.hpp"]),
+    include_prefix = "third_party/boost_pfr",
+    strip_include_prefix = ".",
+    visibility = ["//:__pkg__"],
+)

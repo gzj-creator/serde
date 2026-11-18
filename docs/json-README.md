@@ -23,7 +23,7 @@
 
 默认 `enforce_document_limits = true`，在解析后校验字节、深度、节点、字符串、键、数组和对象成员上限。信任的输入可设为 false，以跳过整树校验、贴近 simdjson 的 parse 成本。重复键策略与资源限制相互独立：只改 `max_depth` 不会改成 first-wins。
 
-递归支持反射结构体、字符串键映射、向量、固定数组、optional、枚举、布尔值、字符串、有符号/无符号整数、浮点值和 JSON null。空的 std::optional 输出为 null；JSON null 解码为空 optional。缺少可选对象成员被接受，缺少必需反射成员则为错误。未知成员默认忽略，可通过 `ParseOptions::unknown_fields = json::UnknownFieldPolicy::reject` 拒绝。
+`serialize`、`deserialize<T>` 和 `decode<T>` 支持[免注册的简单聚合结构体](../README.md#快速开始)。递归支持显式反射结构体、字符串键映射、向量、固定数组、optional、枚举、布尔值、字符串、有符号/无符号整数、浮点值和 JSON null。空的 `std::optional` 输出为 `null`；JSON `null` 解码为空 optional。缺少可选对象成员保留初值，缺少必需成员则为错误。未知成员默认忽略，可通过 `ParseOptions::unknown_fields = json::UnknownFieldPolicy::reject` 拒绝。
 
 现有的 TOML 日期/时间类型通过 `json::date`、`json::time`、`json::local_date_time` 和 `json::offset_date_time` 别名可用。由于 JSON 没有时间原语，它们以经过验证的 ISO/RFC-3339 类 JSON 字符串表示。
 
@@ -33,6 +33,7 @@
 
 `json::stream` 提供独立的流式行为。头文件消费者可包含
 `<serde/json/stream.hpp>` 或 `<serde/json/json.hpp>`；模块消费者使用 `import json`。
+流式输出的结构体仍须提供显式字段契约，不自动发现成员。
 
 `StreamWriter` 接受一个同步 sink：`json::result<void>(std::string_view)`。
 每次写入会立即把 JSON 片段交给 sink，不累计完整输出字符串。sink 成功返回时

@@ -5,7 +5,8 @@ C++ 序列化库，提供 TOML 和 JSON 编解码。JSON 解析由项目内的 s
 ## 特性
 
 - **内置 JSON 后端**：vendored simdjson 4.6.9 直接参与库构建，对外只暴露 `json::Json` 包装接口
-- **编译器无关**：基于编译器无关的反射模块，支持 LLVM/Clang 和 GCC
+- **普通结构体免注册**：同一个 C++23 简单聚合可直接读写 JSON 和 TOML
+- **显式字段契约**：需要稳定协议时，用 `reflect_fields` 固定字段名单、外部名称与约束
 - **确定性序列化**：输出格式规范、可预测
 - **流式 JSON 输出**：`json::stream::StreamWriter` 按输入顺序向同步 sink 输出，支持手动构建、C++ 值和 DOM 遍历
 - **资源限制**：默认校验字节、深度、节点、字符串和容器上限；可用 `enforce_document_limits = false` 关闭整树校验
@@ -28,28 +29,42 @@ C++ 序列化库，提供 TOML 和 JSON 编解码。JSON 解析由项目内的 s
 ## 快速开始
 
 ```cpp
-import toml;
+#include <string>
+#include <serde/json/json.hpp>
+#include <serde/toml/toml.hpp>
 
-namespace config {
-struct server {
+struct Server {
     std::string host;
     int port{};
+    bool operator==(const Server&) const = default;
 };
 
-#define SERVER_FIELDS(X) X(host) X(port)
-REFLECT_FIELDS(server, SERVER_FIELDS)
-#undef SERVER_FIELDS
-}
+int main() {
+    const Server server{"localhost", 8080};
+    const auto json_text = json::serialize(server);
+    const auto toml_text = toml::serialize(server);
+    if (!json_text || !toml_text) return 1;
 
-config::server value{"localhost", 8080};
-auto text = toml::serialize(value);  // 序列化
-auto parsed = toml::deserialize<config::server>(*text);  // 反序列化
+    const auto from_json = json::deserialize<Server>(*json_text);
+    const auto from_toml = toml::deserialize<Server>(*toml_text);
+    return from_json == server && from_toml == server ? 0 : 1;
+}
 ```
+
+自动映射使用成员原名，适用于命名空间作用域、可默认构造的简单聚合。不支持基类、
+引用成员、`const` 数据成员、位域、联合或 C 数组。成员仍须是对应格式支持的类型。
+缺少非 optional 的字段会报错，即使该成员有初值；缺少 optional 时保留初值。
+JSON 的空 optional 输出 `null`；TOML 省略空 optional 字段，数组中不允许空值。
+
+自动映射不会排除敏感字段。对外协议、持久化契约或流式 JSON 请使用
+[显式字段契约](docs/field-contract-README.md)。有 `reflect_fields` 时只使用列出的字段，
+该对象的整个子树不启用自动映射；普通聚合仍可包含这种显式对象。JSON 的 wire 转换、
+`decode_field` 和 `decode_fields_into` 也不启用自动映射。
 
 ## 项目结构
 
 每个模块采用「实现头 + .cppm 门面」的双形态结构：实现全部在头文件中，
-经典 TU 直接 `#include`（无需模块工具链，低标准 C++ 编译器也能消费）；
+经典 TU 直接 `#include`（只需支持 C++23，不要求模块工具链）；
 `.cppm` 是薄门面，供支持 C++23 模块的消费者 `import`。同一程序内
 include 与 import 二选一，不要混用。
 
@@ -62,6 +77,7 @@ src/
 ├── reflect/
 │   ├── reflect.hpp          # 反射实现头（经典 TU 直接 include）
 │   ├── reflect_macros.hpp   # REFLECT_FIELDS / REFLECT_EMPTY 注册宏
+│   ├── detail/              # 两种文本格式共用的内部字段适配
 │   └── reflect.cppm         # `import reflect` 门面
 ├── toml/
 │   ├── toml.hpp             # TOML 实现头
@@ -72,6 +88,7 @@ src/
     └── json.cppm            # `import json` 门面
 
 third_party/
+├── boost_pfr/  # 固定版本的内部聚合字段发现头
 └── simdjson/   # 内置 JSON 后端，直接参与库构建
 
 cmake/          # 包配置模板（serdeConfig.cmake.in）
@@ -117,16 +134,14 @@ simdjson 后端默认构建为启用 PIC 的静态库，也可链接到下游共
 提供 JSON 后端。`.cppm` 门面无法用 rules_cc 0.1.1 编译，Bazel 消费者走头文件。
 
 ```bash
-bazel test //:header_smoke
+bazel test //:header_smoke //:aggregate_formats
 ```
 
 ## 消费方式
 
-### 头文件（任何 C++23 编译器）
+### 头文件
 
 ```cpp
-#include <serde/reflect/reflect.hpp>
-#include <serde/reflect/reflect_macros.hpp>
 #include <serde/toml/toml.hpp>   // 或 <serde/json/json.hpp>
 ```
 
@@ -153,4 +168,5 @@ target_link_libraries(app PRIVATE serde::serde-cpp23-modules serde::serde_simdjs
 
 ## 许可证
 
-Apache-2.0。vendored simdjson 使用其上游许可证，见 `third_party/simdjson/LICENSE.md`。
+Apache-2.0。内置 simdjson 和 Boost.PFR 使用各自的上游许可证，见
+`third_party/simdjson/LICENSE.md` 与 `third_party/boost_pfr/LICENSE_1_0.txt`。

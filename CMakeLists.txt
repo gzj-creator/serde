@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(serde VERSION 0.5.1 LANGUAGES C CXX)
+project(serde VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -193,6 +193,10 @@ endif()
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/simdjson/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/third_party/simdjson
     FILES_MATCHING PATTERN "*.h" PATTERN "*.cpp" PATTERN "*.md"
+)
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/boost_pfr/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/third_party/boost_pfr
+    FILES_MATCHING PATTERN "*.hpp" PATTERN "LICENSE_1_0.txt" PATTERN "UPSTREAM.md"
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     install(DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/fast_float/

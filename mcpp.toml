@@ -1,16 +1,13 @@
 [package]
 name        = "serde"
 namespace   = "gzj-creator"
-version     = "0.5.1"
+version     = "0.6.0"
 description = "A modular C++26 package"
 license     = "Apache-2.0"
 standard    = "c++23"
 
 [toolchain]
 default = "llvm@22.1.8"
-
-[lib]
-path = "src/json/json.cppm"
 
 [build]
 default-profile = "debug"

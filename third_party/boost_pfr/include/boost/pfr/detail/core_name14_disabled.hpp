@@ -1,0 +1,51 @@
+// Copyright (c) 2023 Bela Schaum, X-Ryl669, Denis Mikhailov.
+//
+// Distributed under the Boost Software License, Version 1.0. (See accompanying
+// file LICENSE_1_0.txt or copy at http://www.boost.org/LICENSE_1_0.txt)
+
+
+// Initial implementation by Bela Schaum, https://github.com/schaumb
+// The way to make it union and UB free by X-Ryl669, https://github.com/X-Ryl669
+//
+
+#ifndef SERDE_BOOST_PFR_DETAIL_CORE_NAME14_DISABLED_HPP
+#define SERDE_BOOST_PFR_DETAIL_CORE_NAME14_DISABLED_HPP
+#pragma once
+
+#include <third_party/boost_pfr/include/boost/pfr/detail/config.hpp>
+#include <third_party/boost_pfr/include/boost/pfr/detail/sequence_tuple.hpp>
+
+namespace serde_boost_pfr { namespace pfr { namespace detail {
+
+template <class T, std::size_t I>
+constexpr auto get_name() noexcept {
+    static_assert(
+        sizeof(T) && false,
+        "====================> Boost.PFR: Field's names extracting functionality requires C++20."
+    );
+
+    return nullptr;
+}
+
+template <class T>
+constexpr auto tie_as_names_tuple() noexcept {
+    static_assert(
+        sizeof(T) && false,
+        "====================> Boost.PFR: Field's names extracting functionality requires C++20."
+    );
+
+    return detail::sequence_tuple::make_sequence_tuple();
+}
+
+
+template <class T, class F>
+constexpr void for_each_field_with_name(T&& /* value */, F&& /* func */) {
+    static_assert(
+        sizeof(T) && false,
+        "====================> Boost.PFR: Field's names extracting functionality requires C++20."
+    );
+}
+
+}}} // namespace serde_boost_pfr::pfr::detail
+
+#endif // SERDE_BOOST_PFR_DETAIL_CORE_NAME14_DISABLED_HPP

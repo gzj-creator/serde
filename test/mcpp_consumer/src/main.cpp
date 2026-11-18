@@ -17,8 +17,20 @@ struct Server {
 REFLECT_FIELDS(Server, SERVER_FIELDS)
 #undef SERVER_FIELDS
 
+struct Config {
+    Server server;
+};
+
 int main() {
     const Server original{"localhost", 8080};
+    const auto config_json = json::serialize(Config{original});
+    const auto config_toml = toml::serialize(Config{original});
+    if (!config_json || !config_toml) return 1;
+    const auto json_config = json::deserialize<Config>(*config_json);
+    const auto toml_config = toml::deserialize<Config>(*config_toml);
+    if (!json_config || !toml_config || json_config->server != original ||
+        toml_config->server != original) return 1;
+
     const auto json_text = json::serialize(original);
     const auto toml_text = toml::serialize(original);
     if (!json_text || !toml_text) return 1;

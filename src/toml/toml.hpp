@@ -34,7 +34,7 @@
 // 模块门面经 `export import reflect` / `export import common` 提供依赖词汇，
 // 头文件形态自包含。
 #ifndef SERDE_TOML_MODULE_MODE
-#include "../reflect/reflect.hpp"
+#include "../reflect/detail/object_fields.hpp"
 #include "../common/common.hpp"
 #endif
 
@@ -136,6 +136,9 @@ constexpr void for_each_field(T& value, Function&& function) {
 }
 
 namespace detail {
+
+using reflect::detail::MappedObject;
+using reflect::detail::ObjectMapping;
 
 template <class T>
 using BareT = std::remove_cvref_t<T>;
@@ -2095,7 +2098,7 @@ inline result<Node> parseDocument(std::string_view text, const ParseOptions& opt
  * @param input 待编码的 C++ 值。
  * @return 内部节点，或类型不受支持/值超出范围的错误。
  */
-template <class T>
+template <ObjectMapping Mapping = ObjectMapping::kExplicitOnly, class T>
 result<Node> encodeValue(const T& input);
 
 /**
@@ -2105,7 +2108,7 @@ result<Node> encodeValue(const T& input);
  * @param path 当前值在文档中的路径，用于生成错误信息。
  * @return 解码后的 C++ 值，或类型/范围不匹配错误。
  */
-template <class T>
+template <class T, ObjectMapping Mapping = ObjectMapping::kExplicitOnly>
 result<T> decodeValue(const Node& input, std::string_view path, const ParseOptions& options);
 
 inline std::string rebaseDecodeError(std::string error, std::string_view path) {
@@ -2145,7 +2148,7 @@ inline std::string memberDecodePath(std::string_view path, std::string_view memb
  * @param input 待编码的 C++ 值。
  * @return 内部节点，或类型不受支持/值超出范围的错误。
  */
-template <class T>
+template <ObjectMapping Mapping, class T>
 result<Node> encodeValue(const T& input) {
     using U = BareT<T>;
 
@@ -2159,9 +2162,9 @@ result<Node> encodeValue(const T& input) {
         if (!input) {
             return Node{};
         }
-        return encodeValue(*input);
+        return encodeValue<Mapping>(*input);
     } else if constexpr (InlineTableTraits<U>::value) {
-        auto encoded = encodeValue(input.value);
+        auto encoded = encodeValue<Mapping>(input.value);
         if (!encoded) {
             return std::unexpected(encoded.error());
         }
@@ -2245,9 +2248,9 @@ result<Node> encodeValue(const T& input) {
             // 同时保留普通 vector 对不可复制元素类型的支持。
             auto encoded = [&]() {
                 if constexpr (std::constructible_from<Element, decltype(element)>) {
-                    return encodeValue(static_cast<Element>(element));
+                    return encodeValue<Mapping>(static_cast<Element>(element));
                 } else {
-                    return encodeValue(element);
+                    return encodeValue<Mapping>(element);
                 }
             }();
             if (!encoded) {
@@ -2259,14 +2262,14 @@ result<Node> encodeValue(const T& input) {
             values.push_back(std::move(*encoded));
         }
         Node output{std::move(values)};
-        if constexpr (Reflectable<typename VectorTraits<U>::value_type>) {
+        if constexpr (MappedObject<typename VectorTraits<U>::value_type, Mapping>) {
             output.array_table = true;
         }
         return output;
     } else if constexpr (ArrayTraits<U>::value) {
         Node::array values;
         for (const auto& element : input) {
-            auto encoded = encodeValue(element);
+            auto encoded = encodeValue<Mapping>(element);
             if (!encoded) {
                 return std::unexpected(encoded.error());
             }
@@ -2276,7 +2279,7 @@ result<Node> encodeValue(const T& input) {
             values.push_back(std::move(*encoded));
         }
         Node output{std::move(values)};
-        if constexpr (Reflectable<typename ArrayTraits<U>::value_type>) {
+        if constexpr (MappedObject<typename ArrayTraits<U>::value_type, Mapping>) {
             output.array_table = true;
         }
         return output;
@@ -2286,7 +2289,7 @@ result<Node> encodeValue(const T& input) {
             if (!valid_utf8(key)) {
                 return std::unexpected(std::string("invalid UTF-8 in TOML key"));
             }
-            auto encoded = encodeValue(element);
+            auto encoded = encodeValue<Mapping>(element);
             if (!encoded) {
                 return std::unexpected(encoded.error());
             }
@@ -2296,11 +2299,11 @@ result<Node> encodeValue(const T& input) {
             values.emplace(key, std::move(*encoded));
         }
         return Node{std::move(values)};
-    } else if constexpr (Reflectable<U>) {
+    } else if constexpr (MappedObject<U, Mapping>) {
         Node::table values;
         std::string failure;
         bool failed = false;
-        for_each_field(input, [&](const auto& descriptor, const auto& object) {
+        reflect::detail::for_each_object_field(input, [&](const auto& descriptor, const auto& object) {
             if (failed) {
                 return;
             }
@@ -2311,17 +2314,19 @@ result<Node> encodeValue(const T& input) {
                 failure = "invalid UTF-8 in reflected TOML key";
                 return;
             }
-            if (auto checked = reflect::validate_field(descriptor, member); !checked) {
-                failed = true;
-                failure = "field '" + std::string(descriptor.name) + "': " + checked.error();
-                return;
+            if constexpr (Reflectable<U>) {
+                if (auto checked = reflect::validate_field(descriptor, member); !checked) {
+                    failed = true;
+                    failure = "field '" + std::string(descriptor.name) + "': " + checked.error();
+                    return;
+                }
             }
             if constexpr (OptionalTraits<Member>::value) {
                 if (!member) {
                     return;
                 }
             }
-            auto encoded = encodeValue(member);
+            auto encoded = encodeValue<reflect::detail::object_member_mapping<U>>(member);
             if (!encoded) {
                 failed = true;
                 failure = encoded.error();
@@ -2693,7 +2698,7 @@ inline bool appendTable(const Node::table& table, std::string_view prefix,
  * @param path 当前值在文档中的路径，用于生成错误信息。
  * @return 解码后的 C++ 值，或类型/范围不匹配错误。
  */
-template <class T>
+template <class T, ObjectMapping Mapping>
 result<T> decodeValue(const Node& input, std::string_view path, const ParseOptions& options) {
     using U = BareT<T>;
     const auto where = path.empty() ? std::string("value") : std::string(path);
@@ -2708,13 +2713,13 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
         if (std::holds_alternative<std::monostate>(input.value)) {
             return U{};
         }
-        auto decoded = decodeValue<typename OptionalTraits<U>::value_type>(input, path, options);
+        auto decoded = decodeValue<OptionalValue, Mapping>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
         return U{std::move(*decoded)};
     } else if constexpr (InlineTableTraits<U>::value) {
-        auto decoded = decodeValue<typename InlineTableTraits<U>::value_type>(input, path, options);
+        auto decoded = decodeValue<typename InlineTableTraits<U>::value_type, Mapping>(input, path, options);
         if (!decoded) {
             return std::unexpected(decoded.error());
         }
@@ -2818,7 +2823,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
             output.reserve(values->size());
         }
         for (std::size_t index = 0; index < values->size(); ++index) {
-            auto decoded = decodeValue<typename VectorTraits<U>::value_type>(
+            auto decoded = decodeValue<typename VectorTraits<U>::value_type, Mapping>(
                 (*values)[index], {}, options);
             if (!decoded) {
                 return std::unexpected(rebaseDecodeError(
@@ -2834,7 +2839,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
         }
         U output{};
         for (std::size_t index = 0; index < values->size(); ++index) {
-            auto decoded = decodeValue<typename ArrayTraits<U>::value_type>(
+            auto decoded = decodeValue<typename ArrayTraits<U>::value_type, Mapping>(
                 (*values)[index], {}, options);
             if (!decoded) {
                 return std::unexpected(rebaseDecodeError(
@@ -2850,7 +2855,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
         }
         U output;
         for (const auto& [key, value] : *values) {
-            auto decoded = decodeValue<typename MapTraits<U>::mapped_type>(
+            auto decoded = decodeValue<typename MapTraits<U>::mapped_type, Mapping>(
                 value, {}, options);
             if (!decoded) {
                 return std::unexpected(rebaseDecodeError(
@@ -2859,7 +2864,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
             output.emplace(key, std::move(*decoded));
         }
         return output;
-    } else if constexpr (Reflectable<U>) {
+    } else if constexpr (MappedObject<U, Mapping>) {
         const auto* values = std::get_if<Node::table>(&input.value);
         if (values == nullptr) {
             return std::unexpected(where + " must be a TOML table");
@@ -2870,7 +2875,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
             U output{};
             bool failed = false;
             std::string failure;
-            for_each_field(output, [&](const auto& descriptor, auto& object) {
+            reflect::detail::for_each_object_field(output, [&](const auto& descriptor, auto& object) {
                 if (failed) {
                     return;
                 }
@@ -2884,9 +2889,11 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                     const auto iterator = values->find(descriptor.name);
                     if (iterator == values->end()) {
                         if constexpr (OptionalTraits<Member>::value) {
-                            if (auto checked = reflect::validate_field(descriptor, descriptor.get(object)); !checked) {
-                                failed = true;
-                                failure = memberDecodePath(where, descriptor.name) + " " + checked.error();
+                            if constexpr (Reflectable<U>) {
+                                if (auto checked = reflect::validate_field(descriptor, descriptor.get(object)); !checked) {
+                                    failed = true;
+                                    failure = memberDecodePath(where, descriptor.name) + " " + checked.error();
+                                }
                             }
                             return;
                         } else {
@@ -2896,7 +2903,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                         }
                         return;
                     }
-                    auto decoded = decodeValue<Member>(
+                    auto decoded = decodeValue<Member, reflect::detail::object_member_mapping<U>>(
                         iterator->second, {}, options);
                     if (!decoded) {
                         failed = true;
@@ -2904,10 +2911,12 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                             decoded.error(), memberDecodePath(where, descriptor.name));
                         return;
                     }
-                    if (auto checked = reflect::validate_field(descriptor, *decoded); !checked) {
-                        failed = true;
-                        failure = memberDecodePath(where, descriptor.name) + " " + checked.error();
-                        return;
+                    if constexpr (Reflectable<U>) {
+                        if (auto checked = reflect::validate_field(descriptor, *decoded); !checked) {
+                            failed = true;
+                            failure = memberDecodePath(where, descriptor.name) + " " + checked.error();
+                            return;
+                        }
                     }
                     descriptor.get(object) = std::move(*decoded);
                 }
@@ -2917,7 +2926,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
                     bool known = false;
                     std::apply([&](const auto&... descriptor) {
                         known = ((key == descriptor.name) || ...);
-                    }, reflect::fields(output));
+                    }, reflect::detail::object_fields(output));
                     if (!known) {
                         failed = true;
                         failure = where + " contains unknown field '" + key + "'";
@@ -2947,7 +2956,7 @@ result<T> decodeValue(const Node& input, std::string_view path, const ParseOptio
 template <class T>
 result<std::string> serialize(const T& value,
                               const SerializeOptions& options = {}) {
-    auto encoded = detail::encodeValue(value);
+    auto encoded = detail::encodeValue<detail::ObjectMapping::kAllowAggregate>(value);
     if (!encoded) {
         return std::unexpected(encoded.error());
     }
@@ -2979,7 +2988,7 @@ result<T> deserialize(std::string_view text,
     if (!parsed) {
         return std::unexpected(parsed.error());
     }
-    return detail::decodeValue<T>(*parsed, {}, options);
+    return detail::decodeValue<T, detail::ObjectMapping::kAllowAggregate>(*parsed, {}, options);
 }
 
 }  // 命名空间 toml

@@ -15,7 +15,10 @@ cc_library(
         "SIMDJSON_EXCEPTIONS=0",
         "nssv_CONFIG_NO_EXCEPTIONS=1",
     ],
-    deps = ["//third_party/simdjson:simdjson"] + select({
+    deps = [
+        "//third_party/boost_pfr:boost_pfr",
+        "//third_party/simdjson:simdjson",
+    ] + select({
         "@platforms//os:macos": ["//third_party/fast_float:fast_float"],
         "//conditions:default": [],
     }),
@@ -31,6 +34,13 @@ cc_test(
 cc_test(
     name = "header_smoke",
     srcs = ["test/header_smoke.cpp"],
+    copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
+    deps = [":serde"],
+)
+
+cc_test(
+    name = "aggregate_formats",
+    srcs = ["test/aggregate_formats.cpp"],
     copts = ["-std=c++23", "-fno-exceptions", "-UNDEBUG"],
     deps = [":serde"],
 )

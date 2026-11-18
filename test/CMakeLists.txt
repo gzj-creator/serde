@@ -7,7 +7,7 @@ add_executable(serde_json_stream json_stream.cpp)
 target_link_libraries(serde_json_stream PRIVATE serde::serde)
 add_test(NAME serde_json_stream COMMAND serde_json_stream)
 
-foreach(contract_test IN ITEMS field_contract json_contract toml_stream_contract)
+foreach(contract_test IN ITEMS aggregate_formats field_contract json_contract toml_stream_contract)
     add_executable("serde_${contract_test}" "${contract_test}.cpp")
     target_link_libraries("serde_${contract_test}" PRIVATE serde::serde)
     if(MSVC)
